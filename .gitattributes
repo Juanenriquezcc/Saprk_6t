@@ -1,0 +1,6 @@
+# Windows scripts must keep CRLF line endings in every clone (cmd.exe misparses LF-only
+# batch files in some constructs). Everything else is normalized text.
+* text=auto
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
