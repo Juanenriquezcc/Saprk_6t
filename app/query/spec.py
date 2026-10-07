@@ -18,6 +18,7 @@ PCT_CHANGE = "PCT_CHANGE"
 PCT_CHANGE_PERIOD = "PCT_CHANGE_PERIOD"
 PERCENTAGE_OF = "PERCENTAGE_OF"
 COLUMN_COMPARISON = "COLUMN_COMPARISON"
+GROUP_COUNT = "GROUP_COUNT"          # how many groups satisfy a HAVING condition
 COLUMN_SUMMARY = "COLUMN_SUMMARY"    # statistics of one or more columns (guided / full analysis)
 FILTER_ROWS = "FILTER_ROWS"          # rows that satisfy conditions (bounded)
 MANUAL_SQL = "MANUAL_SQL"            # SQL typed by the user (no QuerySpec)
@@ -29,9 +30,12 @@ TOP = "TOP"            # best group(s) by value
 RECORD = "RECORD"      # whole row(s) with the extreme value
 COMPARE = "COMPARE"    # the same aggregation over two columns
 ROWS = "ROWS"          # plain rows (bounded by LIMIT)
+GROUPS = "GROUPS"      # number of groups (COUNT over a GROUP BY ... HAVING)
 
 # Aggregations. SUMMARY computes `stats` for every column in `columns` in one query.
-AGGREGATIONS = ("COUNT", "COUNT_DISTINCT", "SUM", "AVG", "MIN", "MAX", "PERIOD_CHANGE", "PERCENT", "SUMMARY")
+AGGREGATIONS = ("COUNT", "COUNT_DISTINCT", "SUM", "AVG", "MIN", "MAX", "MEDIAN", "PERCENTILE", "STDDEV", "VARIANCE",
+                "PERIOD_CHANGE", "PERCENT", "SUMMARY")
+TIME_GRAINS = ("year", "quarter", "month", "day")
 SUMMARY_STATS = ("no_nulos", "nulos", "distintos", "minimo", "maximo", "promedio", "desviacion", "suma")
 
 # Question types.
@@ -47,11 +51,19 @@ class Metric:
     kind 'column':     columns = (col,)
     kind 'difference': columns = (a, b)          -> a - b
     kind 'pct_change': columns = (base, final)   -> (final - base) / base * 100
+    kind 'product':    columns = (a, b)          -> a * b                (e.g. quantity x unit price)
+    kind 'product_discount': columns = (a, b, d) -> a * b * (1 - d / discount_scale)
     """
     kind: str
     columns: tuple
+    discount_scale: int = 1      # 1 when the discount is 0.15, 100 when it is 15 (%)
 
     def label(self):
+        if self.kind == "product":
+            return f"{self.columns[0]} x {self.columns[1]}"
+        if self.kind == "product_discount":
+            d = self.columns[2] if self.discount_scale == 1 else f"{self.columns[2]}/100"
+            return f"{self.columns[0]} x {self.columns[1]} x (1 - {d})"
         if self.kind == "difference":
             return f"{self.columns[0]} - {self.columns[1]}"
         if self.kind == "pct_change":
@@ -100,12 +112,18 @@ class QuerySpec:
     limit: int = None
     comparison: tuple = None                      # (col_a, col_b) for COLUMN_COMPARISON
     period_column: str = None                     # date column for PCT_CHANGE_PERIOD
+    group_time: str = None                        # year | quarter | month | day of group_by (a date column)
+    group_date_kind: str = "date"                 # date | timestamp | text (as DateFilter.column_kind)
+    group_date_format: str = None
+    cumulative: bool = False                      # GROUP over time: adds the running total
+    percentile: float = None                      # PERCENTILE: 0.9 = percentile 90
     columns: list = field(default_factory=list)   # columns for SUMMARY
     stats: list = field(default_factory=list)     # SUMMARY_STATS to compute
     answer: str = "value"                         # value | label | row | column:<name>
     question_type: str = OPEN
     options: list = field(default_factory=list)   # [(letter, text)]
     claim: str = None                             # claimed value in TRUE_FALSE
+    claim_op: str = "="                           # '... es mayor a 500000' -> '>'
 
     @property
     def percentage(self):
@@ -129,6 +147,10 @@ class QuerySpec:
     def filter_labels(self):
         return [f.label() for f in (*self.filters, *self.date_filters)] + \
                [f"valor agregado {h.op} {h.value}" for h in self.having]
+
+    def group_label(self):
+        names = {"year": "anio", "quarter": "trimestre", "month": "mes", "day": "dia"}
+        return f"{names[self.group_time]} de {self.group_by}" if self.group_time else self.group_by
 
     def to_dict(self):
         return asdict(self)

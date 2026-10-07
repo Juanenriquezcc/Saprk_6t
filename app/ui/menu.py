@@ -1,4 +1,4 @@
-"""Main menu. An invalid option never closes the program."""
+"""'Herramientas avanzadas': the original main menu. An invalid option never closes the program."""
 from app.analysis import full
 from app.ui import guided, lab_mode, prompts, render, sql_mode
 
@@ -13,13 +13,13 @@ OPTIONS = [
     ("8", "Ejecutar Spark SQL"),
     ("9", "Analisis guiado"),
     ("10", "Analisis completo"),
-    ("0", "Salir"),
+    ("0", "Volver al menu principal"),
 ]
 
 
 def run(session):
     while True:
-        render.banner()
+        render.banner("HERRAMIENTAS AVANZADAS")
         print(f"Dataset: {session.load.path.name} | Registros: {session.profile.rows:,} | "
               f"Columnas: {len(session.profile.columns)} | Spark: LISTO".replace(",", "."))
         print()

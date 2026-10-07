@@ -49,10 +49,10 @@ def load_summary(load, profile):
         fmt += f" (separador {SEP_NAMES.get(o.sep, repr(o.sep))}, encabezado {'si' if o.header else 'no'}, {o.encoding})"
     print(f"Archivo      : {load.path.name}")
     print(f"Formato      : {fmt}")
-    print(f"Registros    : {profile.rows:,}".replace(",", "."))
-    print(f"Columnas     : {len(profile.columns)}")
+    print(f"Registros    : {load.rows:,}".replace(",", "."))
+    print(f"Columnas     : {len(load.columns)}")
     print(f"Vista SQL    : {config.VIEW_NAME}")
-    print(f"Carga/perfil : {load.seconds:.1f} s / {profile.seconds:.1f} s")
+    print(f"Carga        : {load.seconds:.1f} s" + (f" / perfil {profile.seconds:.1f} s" if profile else ""))
     if load.renamed:
         print("Columnas renombradas para poder usarlas en SQL:")
         for original, new in load.renamed:
@@ -96,10 +96,11 @@ def semantic_roles(semantic):
         if status == "missing":
             continue
         cands = semantic.tied(role)
+        kind = config.ROLE_CLASS.get(role, "")
         if status == "ok":
-            print(f"  {role:<9} -> {cands[0].column}  ({cands[0].reason})")
+            print(f"  {role:<13} -> {cands[0].column}  ({kind}; {cands[0].reason})")
         else:
-            print(f"  {role:<9} -> AMBIGUO: {', '.join(c.column for c in cands)} (se preguntara al usarlo)")
+            print(f"  {role:<13} -> AMBIGUO: {', '.join(c.column for c in cands)} (se preguntara al usarlo)")
 
 
 def evidence(ev, compact=False):
@@ -178,3 +179,85 @@ def _kind_label(c):
     if c.date_format:
         return f"fecha (texto {c.date_format})"
     return {"numeric": "numerica", "text": "texto", "date": "fecha", "boolean": "booleana"}.get(c.kind, "otra")
+
+
+# --- workshop -------------------------------------------------------------------
+
+MARKS = {"CORRECTA": "[OK]", "INCORRECTA": "[X] ", "SIN RESPUESTA": "[--]", "NO DETERMINADA": "[??]",
+         "NO RESUELTA": "[!!]"}
+
+
+def box(title):
+    print(f"\n{LINE}\n{title:^52}\n{LINE}")
+
+
+def etl_report(report):
+    box("ETL COMPLETADO")
+    print(f"Registros originales:   {report.original_rows:>12,}".replace(",", "."))
+    print(f"Registros validos:      {report.valid_rows:>12,}".replace(",", "."))
+    print(f"Registros rechazados:   {report.rejected_rows:>12,}".replace(",", "."))
+    if report.duplicates_found:
+        print(f"Duplicados eliminados:  {report.duplicates_removed:>12,}".replace(",", "."))
+    print(f"Columnas:               {len(report.columns):>12}")
+    print("\nTransformaciones:")
+    for label, done in report.checklist():
+        print(f"  {'[OK]' if done else '[--]'} {label}")
+    for r in report.rule_results:
+        print(f"       regla '{r.text}': {r.failed} incumplen" + (f", {r.unknown} sin evaluar" if r.unknown else ""))
+    for column, count in report.invalid_values.items():
+        print(f"       {count} valor(es) no validos en {column}")
+    if report.rejected_rows:
+        print(f"\nLos rechazados se pueden consultar con SQL: SELECT * FROM {config.REJECTED_VIEW_NAME}")
+    print("\nDataset listo para consultas.")
+    print(LINE)
+
+
+def workshop_result(ev):
+    from app.export import TYPE_NAMES
+    from app.questions.validator import claim_text
+    if ev.validation == "NO RESUELTA":
+        box("ERROR")
+        print("No fue posible resolver la pregunta.\n")
+        print(f"Motivo:\n  {ev.validation_note}")
+        if ev.warnings:
+            print("\nPara resolverla el sistema necesita:")
+            for w in ev.warnings:
+                print(f"  - {w.removeprefix('Falta: ')}")
+        print("\nSugerencia: mencione la operacion (promedio, suma, maximo, conteo...) y la columna,\n"
+              "o use 'Ejecutar SQL manual'. La pregunta queda registrada como NO RESUELTA.")
+        print(LINE)
+        return
+    box("RESULTADO")
+    print(f"Pregunta {ev.number} ({TYPE_NAMES.get(ev.question_type, ev.question_type)}):")
+    print("  " + ev.question.replace("\n", "\n  "))
+    if ev.result_rows and (len(ev.result_rows) > 1 or len(ev.result_columns) > 2):
+        print("\nTabla de resultados:")
+        table(ev.result_columns, ev.result_rows, max_rows=10, width=18)
+    print(f"\nResultado calculado:\n  {ev.result_text}")
+    if ev.question_type == "TRUE_FALSE":
+        print(f"\nAfirmacion: {claim_text(ev)}  ->  {ev.verdict or 'NO DETERMINADO'}")
+    if ev.options:
+        print("\nOpciones:")
+        for letter, text in ev.options:
+            print(f"  {letter}) {text}")
+    print(f"\nRespuesta correcta:\n  {ev.correct_answer or '-'}")
+    print(f"\nRespuesta seleccionada:\n  {ev.selected_answer or '(no indicada)'}")
+    print(f"\n{LINE}\n{'VALIDACION: ' + ev.validation:^52}\n{LINE}")
+    if ev.validation_note:
+        print(ev.validation_note)
+    for w in ev.warnings:
+        print(f"AVISO: {w}")
+    print("\nSQL:")
+    print("  " + ev.sql.replace("\n", "\n  "))
+    print(LINE)
+
+
+def question_list(questions):
+    if not questions:
+        print("\nTodavia no hay preguntas resueltas.")
+        return
+    print("\nPREGUNTAS DEL TALLER:")
+    for e in questions:
+        first = e.question.splitlines()[0][:70]
+        print(f"\n  {e.number}. {first}")
+        print(f"     {MARKS.get(e.validation, '[  ]')} {e.validation or 'sin validar'}   resultado: {e.result_text[:60]}")

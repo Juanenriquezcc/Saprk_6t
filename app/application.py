@@ -1,9 +1,11 @@
-"""Application flow: ask for the dataset, load it, profile it and open the menu."""
+"""Application flow: dataset -> ETL -> profile -> workshop menu."""
+import config
 from app.errors import AppError
 from app.session import LabSession
 from app.spark.loader import CsvOptions, detect_format, load_dataset, resolve_path, sniff_csv
 from app.spark.session import get_spark, stop_spark
-from app.ui import lab_mode, menu, render
+from app.ui import etl as etl_ui
+from app.ui import lab_mode, render, workshop
 from app.ui.prompts import ask
 
 EXIT_WORDS = {"salir", "exit", "q"}
@@ -26,13 +28,13 @@ class Application:
             load = self._load(dataset)
             if load is None:
                 return 0
-            print("Perfilando el dataset...")
-            session = LabSession.start(self.spark, load)
-            render.load_summary(load, session.profile)
-            render.semantic_roles(session.semantic)
+            render.load_summary(load, None)
+            report = etl_ui.run(self.spark, load)
+            print("Analizando columnas...")
+            session = LabSession.start(self.spark, load, report)
             if lab:
                 lab_mode.run(session)
-            menu.run(session)
+            workshop.run(session)
             return 0
         except KeyboardInterrupt:
             print("\nSaliendo.")
@@ -45,7 +47,7 @@ class Application:
     def _load(self, dataset):
         pending = dataset
         while True:
-            raw = pending if pending is not None else ask("\nIngrese la ruta del dataset (o 'salir'): ")
+            raw = pending if pending is not None else self._ask_dataset()
             pending = None
             if raw.strip().lower() in EXIT_WORDS:
                 return None
@@ -65,6 +67,21 @@ class Application:
                 return load_dataset(self.spark, path, fmt, csv_options)
             except AppError as exc:
                 show_error(exc)
+
+    def _ask_dataset(self):
+        """Path typed (or dragged) by the user, or the number of a file in datasets\\."""
+        found = []
+        if config.DATASETS_DIR.is_dir():
+            found = sorted(f for f in config.DATASETS_DIR.iterdir()
+                           if f.is_file() and f.suffix.lower() in config.FORMATS_BY_EXTENSION)[:30]
+        if found:
+            print(f"\nDatasets en la carpeta {config.DATASETS_DIR.name}:")
+            for i, f in enumerate(found, 1):
+                print(f"  {i}. {f.name}")
+        raw = ask("\nIngrese la ruta del dataset" + (" o su numero" if found else "") + " (o 'salir'): ")
+        if raw.strip().isdigit() and 1 <= int(raw.strip()) <= len(found):
+            return str(found[int(raw.strip()) - 1])
+        return raw
 
     def _ask_format(self):
         print("\nNo se pudo determinar el formato del archivo.")

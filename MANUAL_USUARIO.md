@@ -6,6 +6,7 @@
 
 ## Contenido
 
+0. [Guía rápida del Modo Taller](#0-guía-rápida-del-modo-taller-léala-primero)
 1. [Descripción del sistema](#1-descripción-del-sistema)
 2. [Requisitos](#2-requisitos)
 3. [Estructura del proyecto](#3-estructura-del-proyecto)
@@ -33,6 +34,140 @@
 25. [Ejemplo completo](#25-ejemplo-completo)
 26. [Buenas prácticas](#26-buenas-prácticas)
 27. [Conclusión](#27-conclusión)
+
+---
+
+## 0. Guía rápida del Modo Taller (léala primero)
+
+Esta sección basta para resolver un taller. El resto del manual es referencia.
+
+### 0.1 Preparar el kit (una sola vez, en casa, con Internet)
+
+```powershell
+.\run.cmd -PrepareKit          # descarga Python portable, Java y PySpark (≈ 600 MB)
+.\run.cmd --check --KitOnly    # debe terminar en ENVIRONMENT READY
+```
+
+Después se copia la carpeta completa a la USB. En el laboratorio no se necesita Internet.
+
+### 0.2 Ejecutar
+
+Doble clic en `run.cmd` (o `.\run.cmd` en una terminal). El programa comprueba el entorno y,
+si todo está bien, muestra `ENVIRONMENT READY`.
+
+### 0.3 Cargar el dataset
+
+Escriba la ruta del archivo (CSV, JSON o Parquet) o **arrástrelo a la terminal** y pulse
+Enter. Si existe una carpeta `datasets\` junto a `run.cmd`, sus archivos aparecen numerados y
+basta con escribir el número. Confirme las opciones del CSV con Enter.
+
+Después corre el **ETL** automáticamente:
+
+1. **Reglas del taller (opcional).** Si el enunciado dice, por ejemplo, "la cantidad debe estar
+   entre 1 y 20", escríbalo (una regla por línea) y termine con una línea vacía. Si no hay
+   reglas, pulse Enter. Ejemplos:
+
+   ```text
+   quantity entre 1 y 20
+   customer_age >= 18 AND customer_age <= 100
+   returned_qty <= quantity
+   año(order_date) = 2025
+   requerido: city, product
+   derivada: ingresos = quantity * unit_price
+   ```
+
+   Si junto al dataset hay un archivo `reglas.txt`, el programa lo ofrece automáticamente.
+2. **Limpieza.** El programa muestra lo que encontró (espacios, valores `N/A`, números
+   escritos como texto `1.250.000`, fechas en varios formatos, `Bogotá`/`BOGOTA`/`bogota`...)
+   y pregunta si se aplica. Opción 1 = aplicar todo.
+3. **Decisiones.** Solo pregunta lo que los datos no permiten decidir: si `03/04/2025` es 3 de
+   abril o 4 de marzo, si `12.500` son miles, qué hacer con duplicados exactos o con registros
+   que no se pueden evaluar porque tienen vacíos. **Nunca elige por usted.**
+4. Al final muestra el **reporte del ETL**: registros originales, válidos y rechazados.
+
+Los rechazados no se borran: quedan en la vista `rechazados` (con el motivo) y los datos
+originales en `dataset_original`. Las preguntas se responden sobre los datos limpios (`dataset`).
+
+### 0.4 Modo Taller: resolver preguntas
+
+En el menú principal elija **1. Resolver pregunta**. Para cada pregunta:
+
+1. Escriba o pegue la pregunta y pulse Enter en una línea vacía.
+2. El programa muestra el **tipo detectado** (Abierta, Selección múltiple o Verdadero/Falso).
+   Enter si es correcto, o 1/2/3 para cambiarlo.
+3. Escriba la **respuesta que marcó el estudiante** (o Enter si no la tiene).
+4. Si algo es ambiguo, el programa pregunta (por ejemplo, qué fórmula usar para "ingresos").
+5. Se muestra el resultado, la respuesta correcta, la seleccionada, la **VALIDACION** y el SQL.
+6. Enter = siguiente pregunta; 0 = volver al menú.
+
+### 0.5 Opciones A, B, C, D
+
+Se pueden pegar junto con la pregunta:
+
+```text
+> ¿Cuál categoría genera mayores ingresos?
+  A) Hogar
+  B) Tecnologia
+  C) Ropa
+  D) Alimentos
+  (línea vacía)
+Respuesta que marco el estudiante (A/B/C/D; Enter = ninguna): B
+```
+
+Si se pegó solo la pregunta, elija el tipo `2` y el programa pide las opciones una por línea.
+
+### 0.6 Verdadero / Falso
+
+Escriba la afirmación con `V/F` (o elija el tipo 3):
+
+```text
+> ¿El promedio de ventas es mayor a 500000? V/F
+> Los registros donde Close > Open son 15.
+> ¿Bogotá tiene más pedidos que Cali? (V/F)
+Respuesta del estudiante (V/F; Enter = ninguna): F
+```
+
+### 0.7 Cómo leer la validación
+
+| Validación | Significado |
+|---|---|
+| `CORRECTA` | La respuesta del estudiante coincide con la calculada por Spark. |
+| `INCORRECTA` | No coincide. Se muestran la correcta y la seleccionada. |
+| `SIN RESPUESTA` | Se calculó la respuesta, pero no se indicó la del estudiante. |
+| `NO DETERMINADA` | Se calculó el resultado, pero ninguna opción coincide (o varias): no se fuerza una respuesta. |
+| `NO RESUELTA` | La pregunta no se pudo interpretar; el programa explica qué le falta. |
+
+Siempre revise el **SQL**: es la evidencia de cómo se obtuvo el resultado.
+
+### 0.8 Finalizar
+
+Elija **8. Finalizar taller**: muestra el resumen (correctas, incorrectas, no resueltas,
+consultas, errores SQL) y pregunta si genera la evidencia (Enter = sí).
+
+### 0.9 Dónde quedan los archivos
+
+```text
+exports\taller_AAAAMMDD_HHMMSS\
+  taller.sql        todas las consultas SQL ejecutadas
+  respuestas.csv    una fila por pregunta (abre en Excel)
+  evidencia.txt     evidencia legible de cada pregunta
+  evidencia.json    toda la información estructurada
+  resumen.txt       resumen del taller
+  etl_report.json   estadísticas del ETL y de la calidad
+```
+
+Si la USB es de solo lectura se guardan en `%TEMP%\PySparkLabAnalyzer\exports`.
+
+### 0.10 Errores comunes
+
+| Situación | Qué hacer |
+|---|---|
+| `ENVIRONMENT NOT READY` | Leer el mensaje; normalmente basta aceptar la reparación (`s`). Ver `EMERGENCY.md`. |
+| "Pregunta no reconocida automaticamente" | Reformular nombrando la operación (promedio, suma, máximo, conteo) y la columna (ver **6. Ver esquema**). |
+| "METRICA AMBIGUA" | Elegir la fórmula que indica el enunciado del taller. |
+| "La regla ... no es valida" | Corregir la regla (nombre de columna exacto) o pulsar Enter para seguir sin reglas. |
+| Resultado inesperado | Revisar el SQL; usar **7. Ejecutar SQL manual** para comprobar. |
+| El dataset no carga | Revisar la ruta (arrastrar el archivo) y el formato. |
 
 ---
 
@@ -264,50 +399,45 @@ una columna que no existe.
 ## 7. Menú principal
 
 ```text
-   1. Analizar dataset (resumen y roles semanticos)
-   2. Hacer pregunta
-   3. Modo laboratorio (respuesta rapida)
-   4. Ver esquema
-   5. Ver perfil
-   6. Ver historial
-   7. Exportar evidencia (JSON y CSV)
-   8. Ejecutar Spark SQL
-   9. Analisis guiado
-  10. Analisis completo
-   0. Salir
+Estado:
+  [OK] Dataset cargado
+  [OK] ETL ejecutado
+  [OK] Datos validados
+  [OK] Spark SQL disponible (vista 'dataset')
+
+  1. Resolver pregunta (Modo Taller)
+  2. Ver preguntas resueltas
+  3. Ver resultado de una pregunta
+  4. Ver consultas SQL
+  5. Ver calidad del dataset (ETL)
+  6. Ver esquema
+  7. Ejecutar SQL manual
+  8. Finalizar taller
+  9. Herramientas avanzadas
+  0. Salir
 ```
 
 Una opción no válida muestra `Opcion no valida.` y el menú vuelve a aparecer; nunca cierra
-el programa.
+el programa. Al salir con preguntas sin exportar, el programa ofrece generar la evidencia.
 
-| Opción | Qué hace | Cuándo usarla | Resultado |
-|---|---|---|---|
-| 1. Analizar dataset | Muestra el resumen de carga (archivo, formato, registros, columnas, tiempos, columnas renombradas) y los roles semánticos detectados, indicando los ambiguos. | Al empezar, para confirmar que el dataset se cargó bien. | Texto en pantalla. |
-| 2. Hacer pregunta | Pide una pregunta (con opciones si las tiene) y la resuelve mostrando la evidencia completa. | Para una pregunta aislada con todo el detalle. | Evidencia completa (sección 10). |
-| 3. Modo laboratorio | Bucle de preguntas con salida compacta (sección 8). | Durante el examen. | Una evidencia por pregunta. |
-| 4. Ver esquema | Lista las columnas con su tipo Spark y su clase (numérica, texto, fecha, categórica, identificador). | Para conocer los nombres exactos antes de escribir SQL. | Tabla. |
-| 5. Ver perfil | Nulos, % de nulos, distintos aproximados, mínimo, máximo, promedio por columna, columnas por clase, valores de las categóricas y 5 filas de ejemplo. | Para entender el dataset. | Tablas. |
-| 6. Ver historial | Lista numerada de todas las operaciones de la sesión. | Para repasar respuestas. | Tabla #, pregunta, respuesta, intención. |
-| 7. Exportar evidencia | Guarda el historial en JSON y CSV (sección 18). | Al terminar, o periódicamente. | Dos archivos. |
-| 8. Ejecutar Spark SQL | Consultas SQL manuales de solo lectura (sección 15). | Cuando una pregunta no se interpreta o se quiere verificar algo. | Evidencia con tipos y resultado. |
-| 9. Análisis guiado | Ocho operaciones por menús (sección 13). | Cuando se sabe qué calcular pero la pregunta no se reconoce. | Evidencia. |
-| 10. Análisis completo | Hasta 12 análisis automáticos (sección 14). | Para una visión general rápida del dataset. | Una evidencia por paso. |
-| 0. Salir | Cierra Spark y termina. | — | — |
-
-Ejemplo (opción 2):
-
-```text
-Pregunta (Enter en linea vacia para terminar):
-> ¿Cuál es el volumen total?
-  (Enter)
-RESPUESTA      : 22200
-```
+| Opción | Qué hace |
+|---|---|
+| 1. Resolver pregunta | Modo Taller (sección 0.4): pregunta → tipo → respuesta del estudiante → validación. |
+| 2. Ver preguntas resueltas | Lista numerada con `[OK] CORRECTA`, `[X] INCORRECTA`, etc. |
+| 3. Ver resultado | Evidencia completa de una pregunta (SQL, opciones, validación, tabla). |
+| 4. Ver consultas SQL | Todas las consultas de la sesión. |
+| 5. Ver calidad del dataset | Reporte del ETL: transformaciones, reglas, rechazados, nulos. |
+| 6. Ver esquema | Columnas, tipos y roles semánticos (dimensión, medida, tiempo). |
+| 7. Ejecutar SQL manual | Consultas de solo lectura (sección 15). |
+| 8. Finalizar taller | Resumen y exportación (secciones 0.8 y 0.9). |
+| 9. Herramientas avanzadas | El menú anterior completo: perfil, modo laboratorio rápido, análisis guiado, análisis completo, historial y exportación JSON/CSV (secciones 8 y 13–18). |
 
 ---
 
 ## 8. Modo laboratorio
 
-Se entra con la opción 3 del menú o directamente con `.\run.cmd datos.csv --lab`.
+Se entra desde **9. Herramientas avanzadas → 3** o directamente con `.\run.cmd datos.csv --lab`
+(después del ETL). A diferencia del Modo Taller, no pide la respuesta del estudiante ni valida.
 
 ```text
 Escriba la pregunta (puede pegar tambien las opciones A-D) y termine con una linea vacia.
@@ -881,6 +1011,13 @@ sistema no modifica variables de entorno del equipo, el PATH ni las políticas d
 - **Validación con el dataset real:** al preparar esta entrega no se disponía del dataset real
   del laboratorio ni de las opciones del PDF; las 10 preguntas se validaron con datasets de
   prueba. `tests/test_lab_real.py` está preparado para validarlas cuando se agreguen esos datos.
+- **ETL:** solo unifica categorías que difieren en mayúsculas, tildes o espacios
+  (`Bogota`/`BOGOTÁ`); variantes con otras letras (`Bogta`) no se corrigen. Columnas de texto
+  con más de 5.000 valores distintos no se normalizan. En 500.000 registros sucios el ETL tarda
+  ≈ 17 s (8 núcleos).
+- **Fórmulas:** "ingresos"/"ventas" sin columna propia se calculan solo con la fórmula que el
+  usuario elige (cantidad × precio, con o sin descuento); no se infieren otras fórmulas.
+- **Una sola agrupación por pregunta** ("por mes" o "por ciudad", no ambas).
 - **Primer arranque en cada PC:** crear el `.venv` tarda de 1 a 3 minutos.
 - **Políticas de dominio** que exigen scripts firmados impiden ejecutar `run.cmd`.
 
@@ -889,17 +1026,14 @@ sistema no modifica variables de entorno del equipo, el PATH ni las políticas d
 ## 24. Flujo recomendado para el laboratorio
 
 ```text
-1. Abrir la carpeta del proyecto (USB) y ejecutar:  run.cmd datos.csv --lab
-   (o run.cmd y escribir la ruta cuando la pida)
-2. Esperar ENVIRONMENT READY (aceptar la recreación del .venv si la ofrece)
-3. Confirmar las opciones del CSV (Enter)
-4. Revisar el resumen y los roles semánticos que aparecen tras la carga
-5. Si se entró sin --lab: opción 4 (esquema) y 5 (perfil); luego opción 3
-6. Pegar la pregunta (con opciones o V/F) y Enter en una línea vacía
-7. Revisar la INTERPRETACION y la CONSULTA SPARK SQL
-8. Revisar el RESULTADO y la RESPUESTA (y los AVISOS)
-9. Si no se entiende la pregunta: :q y opción 9 (Análisis guiado) u 8 (Spark SQL)
-10. Al terminar: :x (o opción 7) para exportar la evidencia en JSON y CSV
+1. Ejecutar run.cmd y esperar ENVIRONMENT READY
+2. Cargar el dataset (ruta, arrastrar el archivo o número de datasets\)
+3. Escribir las reglas de calidad del enunciado (o Enter si no hay) y aceptar la limpieza
+4. Revisar el reporte del ETL (originales / válidos / rechazados)
+5. Menú 1: escribir cada pregunta, confirmar el tipo y la respuesta del estudiante
+6. Revisar la VALIDACION y el SQL de cada pregunta
+7. Si una pregunta no se reconoce: reformularla, o usar 7 (SQL manual) / 9 (análisis guiado)
+8. Menú 8: Finalizar taller y generar la evidencia en exports	aller_...
 ```
 
 ---

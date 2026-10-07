@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.query import spec as s
+from app.questions import lexicon as lx
 from app.text import normalize, strip_accents
 
 _NUMBER_PREFIX = re.compile(r"^\s*(?:p|pregunta|question|q)?\s*(\d{1,3})\s*[.:)\-]\s+", re.IGNORECASE)
@@ -21,7 +22,7 @@ _CLAIM_HEAD = re.compile(r"^\s*(?P<value>[^\s]+)\s+(?:es|fue|is|was)\s+(?P<rest>
 # True/false markers written apart: a "V/F" line, "(V/F)" at the end of a line.
 _TF_MARK = r"(?:v\s*/\s*f|v\s+o\s+f|verdadero\s*/\s*falso|verdadero\s+o\s+falso|true\s*/\s*false|t\s*/\s*f)"
 _TF_LINE = re.compile(rf"^\s*\(?\s*{_TF_MARK}\s*\)?\s*[.:]?\s*$", re.IGNORECASE)
-_TF_INLINE = re.compile(rf"\(\s*{_TF_MARK}\s*\)", re.IGNORECASE)
+_TF_INLINE = re.compile(rf"\(\s*{_TF_MARK}\s*\)|(?<=[\s?.])\s*{_TF_MARK}\s*[.:]?\s*$", re.IGNORECASE)
 # Instructions of a true/false item ("Si es falso escribir la respuesta"): not part of the question.
 _TF_INSTRUCTION = re.compile(r"^\s*(?:si\s+es\s+falso|si\s+es\s+falsa|if\s+(?:it\s+is\s+)?false)\b", re.IGNORECASE)
 # A question starting like this asks for a value, it is not a claim.
@@ -38,6 +39,7 @@ class ParsedQuestion:
     number: int = None
     options: list = field(default_factory=list)   # [(letter, text)]
     claim: str = None
+    claim_op: str = "="           # '... es mayor a 100' -> '>'
 
 
 def parse_question(raw):
@@ -53,15 +55,15 @@ def parse_question(raw):
     if kind == s.OPEN:
         options = []
 
-    claim = None
+    claim, claim_op = None, "="
     if kind == s.OPEN:
-        body, claim, explicit = _split_claim(body, marked_tf)
+        body, claim, explicit, claim_op = _split_claim(body, marked_tf)
         if claim is not None:
             kind = s.TRUE_FALSE
         elif explicit:
             kind = s.TRUE_FALSE   # marked as T/F but without a value: interpreter reports it
     return ParsedQuestion(raw=raw, body=body.strip(), normalized=normalize(body), kind=kind,
-                          number=number, options=options, claim=claim)
+                          number=number, options=options, claim=claim, claim_op=claim_op)
 
 
 def _split_options(text):
@@ -122,17 +124,26 @@ def _split_claim(body, marked=False):
     # when it does not start with an interrogative word.
     needs_number = "?" in text and not explicit
     if needs_number and _INTERROGATIVE.match(normalize(text)):
-        return original, None, explicit
+        return original, None, explicit, "="
 
     # The claimed value follows the LAST verb that leaves a short value at the end.
     for verb in reversed(list(_CLAIM_VERB.finditer(text))):
         value = text[verb.end():].strip().rstrip(".?!¿¡ ").strip()
+        compared = _COMPARATIVE.fullmatch(strip_accents(value).lower())
+        if compared:
+            op = next(sql for rx, sql in lx.CLAIM_COMPARATIVE if re.fullmatch(rx, compared.group("op")))
+            return text[: verb.start()], value[compared.start("num"):].strip(), explicit, op
         if value and _short_value(value) and (not needs_number or any(ch.isdigit() for ch in value)):
-            return text[: verb.start()], value, explicit
+            return text[: verb.start()], value, explicit, "="
     head = _CLAIM_HEAD.match(text.rstrip(".?! "))
     if head and not needs_number:
-        return head.group("rest"), head.group("value"), explicit
-    return (text if explicit else original), None, explicit
+        return head.group("rest"), head.group("value"), explicit, "="
+    return (text if explicit else original), None, explicit, "="
+
+
+_COMPARATIVE = re.compile(
+    r"(?P<op>" + "|".join(rx for rx, _ in lx.CLAIM_COMPARATIVE) + r")\s+(?:los\s+|las\s+|el\s+|la\s+)?"
+    r"(?P<num>[-+]?\$?\s?\d[\d.,]*%?)")
 
 
 def _short_value(value):

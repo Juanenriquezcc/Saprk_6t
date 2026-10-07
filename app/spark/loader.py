@@ -101,8 +101,8 @@ def _sniff_format(path):
 
 # --- CSV ----------------------------------------------------------------------
 
-def sniff_csv(path):
-    """Detects separator, header and encoding reading only the first KB."""
+def _sample(path):
+    """(text of the first KB without the last incomplete line, Spark encoding name)."""
     raw = _first_file(path).open("rb").read(config.CSV_SNIFF_BYTES)
     try:
         # final=False tolerates a multibyte character cut at the end of the sample.
@@ -114,7 +114,16 @@ def sniff_csv(path):
         encoding = "ISO-8859-1"
     if len(raw) == config.CSV_SNIFF_BYTES and "\n" in text:
         text = text[: text.rfind("\n")]  # drop the last, incomplete line
+    return text, encoding
 
+
+def sample_text(path):
+    return _sample(path)[0]
+
+
+def sniff_csv(path):
+    """Detects separator, header and encoding reading only the first KB."""
+    text, encoding = _sample(path)
     sniffer = csv.Sniffer()
     try:
         sep = sniffer.sniff(text, delimiters=config.CSV_DELIMITERS).delimiter

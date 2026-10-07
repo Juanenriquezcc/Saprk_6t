@@ -134,3 +134,89 @@ def test_500k_rows(spark, big_csv):
     # The engine never brings the 500k rows to Python: its memory must stay flat.
     assert rss_after - rss_before < 50
     load.df.unpersist()
+
+
+# --- 500k DIRTY rows through the whole workshop: ETL + rules + questions + export --------------
+
+CITIES = ["Bogota"] * 4 + ["Medellin"] * 3 + ["Cali"] * 2 + ["Pasto", "Barranquilla"]
+STATUS = ["Entregado", "Entregado", "Entregado", "Devuelto", "Cancelado"]
+
+
+@pytest.fixture(scope="module")
+def dirty_csv(tmp_path_factory):
+    """Dirty sales data plus an independent oracle computed while writing it (test data only)."""
+    path = tmp_path_factory.mktemp("big") / "ventas_500k_sucio.csv"
+    oracle = {"rows": 0, "valid": 0, "duplicates": 0, "delivered": {}, "quantity": 0}
+    with path.open("w", encoding="utf-8", newline="") as f:
+        f.write("order_id;order_date;city;quantity;unit_price_cop;discount;status\n")
+        for i in range(ROWS):
+            city = CITIES[i * 7 % 11]
+            written_city = city.upper() + " " if i % 13 == 0 else (
+                {"Bogota": "Bogotá", "Medellin": "Medellín"}.get(city, city) if i % 17 == 0 else city)
+            status = STATUS[i % 5]
+            written_status = "N/A" if i % 23 == 0 else ("entregado" if i % 19 == 0 and status == "Entregado" else status)
+            quantity = 25 if i % 500 == 0 else 1 + i % 20
+            written_q = "abc" if i % 1000 == 7 else str(quantity)
+            price = 1000 * (5 + i % 300)
+            date = f"2025-{1 + i // 100 % 12:02d}-{1 + i % 28:02d}" if i % 2 else f"{1 + i % 28:02d}/{1 + i // 100 % 12:02d}/2025"
+            written_price = f"{price:,}".replace(",", ".")          # Spanish thousands: 12.000
+            line = f"{i};{date};{written_city};{written_q};{written_price};0,{i % 3};{written_status}\n"
+            copies = 2 if i % 10000 == 1 else 1
+            f.write(line * copies)
+            oracle["rows"] += copies
+            if quantity > 20 or written_q == "abc":
+                continue
+            oracle["valid"] += 1                  # duplicates removed: one copy stays
+            oracle["duplicates"] += copies - 1
+            oracle["quantity"] += quantity
+            if written_status != "N/A" and status == "Entregado":
+                oracle["delivered"][city] = oracle["delivered"].get(city, 0) + 1
+    return path, oracle
+
+
+def test_500k_dirty_workshop(spark, dirty_csv, tmp_path):
+    from app.etl import pipeline
+    from app.etl.rules import parse_rules
+    from app.export import export_workshop
+    from app.session import LabSession
+    from app.spark.loader import load_dataset, resolve_path, sniff_csv
+
+    path, oracle = dirty_csv
+    timings = []
+
+    def timed(label, fn):
+        start = time.perf_counter()
+        out = fn()
+        timings.append((label, time.perf_counter() - start))
+        return out
+
+    rss_start = python_rss_mb()
+    load = timed("carga", lambda: load_dataset(spark, resolve_path(str(path)), "csv", sniff_csv(path)))
+    assert load.rows == oracle["rows"]
+    answers = {"transform": "all", "unknown": True, "duplicates": True, "number:unit_price_cop": "thousands"}
+    report = timed("ETL (transformar + validar + cargar)",
+                   lambda: pipeline.run(spark, load, parse_rules("quantity entre 1 y 20"), lambda d: answers[d.key]))
+    assert report.valid_rows == oracle["valid"] and report.duplicates_removed == oracle["duplicates"]
+    session = timed("perfilado", lambda: LabSession.start(spark, load, report))
+
+    solve = lambda q, sel=None: session.solve_question(q, chooser({}), selected=sel)   # noqa: E731
+    expected_city = max(oracle["delivered"], key=oracle["delivered"].get)
+    ev = timed("ciudad con mas pedidos entregados", lambda: solve("¿Cuál ciudad tiene más pedidos entregados?", expected_city))
+    assert ev.value == expected_city and ev.validation == "CORRECTA"
+    ev = timed("conteo", lambda: solve("¿Cuántos registros hay?", str(oracle["valid"])))
+    assert ev.validation == "CORRECTA"
+    ev = timed("suma", lambda: solve("¿Cuál es el total de quantity?"))
+    assert ev.value == oracle["quantity"]
+    ev = timed("V/F comparativa", lambda: solve("¿El promedio de unit_price_cop es mayor a 100000? V/F", "V"))
+    assert ev.verdict == "VERDADERO"          # prices 5.000 .. 304.000 read as thousands
+    ev = timed("por mes acumulado", lambda: solve("Cantidad total por mes acumulada"))
+    assert ev.result_rows[-1][2] == oracle["quantity"] and len(ev.result_rows) == 12
+    folder = timed("exportacion", lambda: export_workshop(session, tmp_path))
+    rss_end = python_rss_mb()
+    print(f"\n{'operacion (500k sucio)':<42} {'segundos':>8}")
+    for label, seconds in timings:
+        print(f"{label:<42} {seconds:>8.2f}")
+    print(f"RSS Python inicio/fin: {rss_start:.0f} / {rss_end:.0f} MB; rechazados {report.rejected_rows}")
+    assert len(list(folder.iterdir())) == 6
+    assert rss_end - rss_start < 80              # rows never travel to Python
+    report.df.unpersist()

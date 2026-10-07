@@ -18,7 +18,7 @@ def normalize(text):
     """Lowercase, no accents, punctuation removed except what numbers, dates and
     comparison operators need (digits with . , - / %, and < > = !)."""
     text = strip_accents(text).lower()
-    text = re.sub(r"[¿?¡!;:\"“”‘’`´(){}\[\]']", " ", text)
+    text = re.sub(r"[¿?¡!;:\"“”‘’`´(){}\[\]'_]", " ", text)    # '_': 'unit_price' = 'unit price'
     text = re.sub(r"(?<!\d),|,(?!\d)", " ", text)     # keep decimal commas only
     text = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", text)   # keep decimal points only
     return re.sub(r"\s+", " ", text).strip()

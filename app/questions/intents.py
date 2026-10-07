@@ -23,6 +23,7 @@ from app.questions import lexicon as lx
 from app.questions.numbers import format_number, read_number
 from app.text import STOPWORDS, name_tokens, normalize, phrase_pattern
 
+PRODUCT = r"@m(\d+)@\s*(?:\*|×|x)\s*@m(\d+)@"      # explicit formula 'quantity * unit_price'
 AGG_LABELS = {"SUM": "Suma total (SUM)", "AVG": "Promedio (AVG)", "MAX": "Maximo (MAX)",
               "MIN": "Minimo (MIN)", "COUNT": "Conteo de registros (COUNT)"}
 
@@ -53,6 +54,7 @@ class Mention:
     value: object = None
     column: str = None   # resolved column
     used: bool = False
+    metric: object = None   # resolved Metric of a revenue word (a column or a formula)
 
 
 class SchemaIndex:
@@ -81,7 +83,7 @@ class SchemaIndex:
             for value in col.values:
                 text = normalize(str(value))
                 if isinstance(value, str) and len(text) >= 2 and text not in STOPWORDS:
-                    self._add(rf"(?<![\w@]){re.escape(text)}(?![\w@])", "value", col.name, 2, value)
+                    self._add(rf"(?<![\w@]){_inflected(text)}(?![\w@])", "value", col.name, 2, value)
 
     def _add(self, pattern, kind, target, priority, value=None):
         self.patterns.append((re.compile(pattern), kind, target, priority, value))
@@ -97,6 +99,20 @@ class SchemaIndex:
             if all(men.end <= c.start or men.start >= c.end for c in chosen):
                 chosen.append(men)
         return sorted(chosen, key=lambda m: m.start)
+
+
+def _inflected(text):
+    """Regex for a category value and its Spanish plural/gender forms:
+    'entregado' also matches 'entregados', 'entregada', 'entregadas'; 'bogota' only itself."""
+    body = re.escape(text)
+    if len(text) > 4 and re.search(r"[a-z]$", text) and " " not in text[-4:]:
+        if text[-1] in "oa":
+            return body[:-1] + "(?:o|a|os|as)"
+        if text[-1] in "lrnzd":       # 'canal' -> 'canales', 'proveedor' -> 'proveedores'
+            return body + "(?:es)?"
+        if text[-1] == "e":
+            return body + "s?"
+    return body
 
 
 class Interpreter:
@@ -127,6 +143,9 @@ class _Run:
         self.extra = extra
         self.profile = interpreter.profile
         self.semantic = interpreter.semantic
+        self.percentile = None
+        self.time_group = None
+        self.having = None
 
     # --- choices and column resolution -----------------------------------------
 
@@ -178,6 +197,66 @@ class _Run:
                    else f"No se encontro una columna para '{word}'. Seleccione una.")
         return self._ask(key, message, options, remember=True)
 
+    def _is_revenue(self, m):
+        return m.kind == "generic" and m.target in lx.REVENUE_WORDS
+
+    def _revenue_metric(self, m):
+        """'ingresos' / 'ventas': an existing column or a formula. Returns a Metric, or
+        "COUNT" when the user says 'ventas' means number of sales. Never chosen silently
+        when there is more than one reading; a formula is always confirmed."""
+        if m.metric is not None:
+            return m.metric
+        countable = m.target in lx.COUNTABLE_WORDS
+        key = f"metric:{'ventas' if countable else 'ingresos'}"
+        options = []
+        for role in lx.GENERIC_WORDS[m.target]:
+            for c in self.semantic.of(role):
+                if c.column not in [o[1].columns[0] for o in options]:
+                    options.append((f"Columna {c.column}", Metric("column", (c.column,))))
+        columns_found = len(options)
+        quantity = self._resolve_role_silently("QUANTITY")
+        if quantity:
+            taken = {o[1].columns[0] for o in options}
+            prices = [c.column for c in self.semantic.of("PRICE") if c.column not in taken and c.column != quantity]
+            discount = self._resolve_role_silently("DISCOUNT")
+            scale = self._discount_scale(discount)
+            for price in prices[:3]:
+                metric = Metric("product", (quantity, price))
+                options.append((f"{metric.label()}  (cantidad x precio)", metric))
+                if discount and scale:
+                    metric = Metric("product_discount", (quantity, price, discount), scale)
+                    options.append((f"{metric.label()}  (con descuento)", metric))
+        if countable:
+            options.append(("Numero de ventas (conteo de registros)", "COUNT"))
+        if not options:
+            raise _Need(NeedsInput(key, f"No se encontro una columna ni una formula para '{m.word}'.",
+                                   missing=[f"una columna de {m.word} (o cantidad y precio para calcularlo)"]))
+        if len(options) == 1 and columns_found == 1:
+            m.metric = options[0][1]
+        else:
+            m.metric = self._ask(key, f"METRICA AMBIGUA: se detecto '{m.word}'. Seleccione la interpretacion "
+                                      "indicada por el taller.", options, remember=True)
+        return m.metric
+
+    def _discount_scale(self, column):
+        """1 when the discount is stored as 0.15, 100 when stored as 15; None if unclear."""
+        if not column:
+            return None
+        col = self.profile.column(column)
+        top = col.max if col is not None else None
+        if top is None:
+            return None
+        return 1 if top <= 1 else (100 if top <= 100 else None)
+
+    def _metric(self, m):
+        """Metric of a numeric mention (a revenue word may be a formula)."""
+        if self._is_revenue(m):
+            metric = self._revenue_metric(m)
+            if metric == "COUNT":
+                raise _Need(unrecognized(["una medida numerica: 'ventas' se eligio como conteo de registros"]))
+            return metric
+        return Metric("column", (self._resolve(m),))
+
     def _resolve(self, m):
         if m.column is None:
             if m.kind in ("column", "value"):
@@ -208,8 +287,7 @@ class _Run:
         text = self.p.normalized
         if not text:
             raise _Need(unrecognized(["el texto de la pregunta"]))
-        if self.p.kind == s.TRUE_FALSE and self.p.claim is None:
-            raise _Need(unrecognized(["el valor afirmado (por ejemplo: '... es 15')"]))
+        self.inferred_claim = None
         text = re.sub(lx.COUNT_ROWS_PHRASE, "cuantos registros", text)
         text, dates = self._extract_dates(text)
         self.mentions, masked = self._scan(text, self.it.index_op)
@@ -218,13 +296,59 @@ class _Run:
             # 'precio maximo' with no other operation word: 'maximo' IS the operation.
             self.mentions, masked = self._scan(text, self.it.index)
         masked, date_filters = self._date_filters(masked, dates)
+        masked, self.time_group = self._time_group(masked)
+        masked, self.having = self._having(masked)
         masked, conditions = self._conditions(masked)
         self.masked = masked
         spec = self._shape(masked, conditions, date_filters)
+        if self.having and spec.shape not in (s.GROUP, s.GROUPS):
+            raise _Need(unrecognized(["la agrupacion de la condicion (por ejemplo: 'empresas con un promedio "
+                                      "de cierre mayor a 100')"]))
         spec.question_type = self.p.kind
         spec.options = list(self.p.options)
-        spec.claim = self.p.claim
+        spec.claim = self.p.claim if self.p.claim is not None else self.inferred_claim
+        spec.claim_op = getattr(self.p, "claim_op", "=") or "="
+        if spec.question_type == s.TRUE_FALSE and spec.claim is None:
+            raise _Need(unrecognized(["el valor afirmado (por ejemplo: '... es 15' o '... es mayor a 100')"]))
         return spec
+
+    # --- time grouping and HAVING ------------------------------------------------
+
+    def _time_group(self, masked):
+        """'por mes' / 'en que ano' / 'mensual' -> (grain, source) and the words removed."""
+        if not self.profile.date_columns:
+            return masked, None
+        for rx, source in lx.TIME_GROUP:
+            m = re.search(rx, masked)
+            if m:
+                return masked[:m.start()] + " " + masked[m.end():], (lx.TIME_WORDS[m.group(1)], source)
+        return masked, None
+
+    def _having(self, masked):
+        """'con mas de 100 pedidos' / 'con un promedio de cierre mayor a 100' -> HAVING."""
+        m = re.search(lx.HAVING_COUNT, masked)
+        if m:
+            op = lx.HAVING_COUNT_OPS[" ".join(m.group(1).split())]
+            having = {"agg": "COUNT", "mention": None, "op": op, "value": self._number(m.group(2))}
+            return masked[:m.start()] + " " + masked[m.end():], having
+        ops = "|".join(f"(?:{rx})" for rx, _ in lx.OPERATORS)
+        aggs = "|".join(lx.HAVING_AGG_WORDS)
+        number = r"(?P<num>-?\d[\d.,]*\d|-?\d)(?![\d@])"
+        for rx in (rf"(?<![\w@])(?P<agg>{aggs})\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?)?@m(?P<m>\d+)@{lx.COPULA}\s*"
+                   rf"(?P<op>{ops}){lx.ARTICLES}\s*{number}",
+                   rf"@m(?P<m>\d+)@\s+(?P<agg>{aggs}){lx.COPULA}\s*(?P<op>{ops}){lx.ARTICLES}\s*{number}"):
+            m = re.search(rx, masked)
+            if not m:
+                continue
+            mention = self.mentions[int(m.group("m"))]
+            if self._kind(mention) != "numeric":
+                continue
+            op = next(sql for rx_op, sql in lx.OPERATORS if re.fullmatch(rx_op, m.group("op")))
+            mention.used = True
+            having = {"agg": lx.HAVING_AGG_WORDS[m.group("agg")], "mention": mention, "op": op,
+                      "value": self._number(m.group("num"))}
+            return masked[:m.start()] + " " + masked[m.end():], having
+        return masked, None
 
     @staticmethod
     def _scan(text, index):
@@ -317,14 +441,28 @@ class _Run:
                              rf"(?:@m(?P<right>\d+)@|(?P<num>-?\d[\d.,]*\d|-?\d))(?![\d@])")
         conditions = []
 
+        def between(m):
+            left = self.mentions[int(m.group(1))]
+            if self._kind(left) != "numeric" or left.used or self._is_revenue(left):
+                return m.group(0)
+            column = self._resolve(left)
+            left.used = True
+            conditions.append(Condition(column, ">=", value=self._number(m.group(2))))
+            conditions.append(Condition(column, "<=", value=self._number(m.group(3))))
+            return f" @c{len(conditions) - 2}@ @c{len(conditions) - 1}@ "
+
+        num = r"(-?\d[\d.,]*\d|-?\d)"
+        masked = re.sub(rf"@m(\d+)@{lx.COPULA}\s*(?:entre|between)\s+{num}\s+(?:y|and|a)\s+{num}(?![\d@])",
+                        between, masked)
+
         def replace(m):
             left = self.mentions[int(m.group(1))]
-            if self._kind(left) not in ("numeric", "any") or left.used:
+            if self._kind(left) not in ("numeric", "any") or left.used or self._is_revenue(left):
                 return m.group(0)
             op = next(sql for rx, sql in lx.OPERATORS if re.fullmatch(rx, m.group("op")))
             if m.group("right") is not None:
                 right = self.mentions[int(m.group("right"))]
-                if self._kind(right) != "numeric":
+                if self._kind(right) != "numeric" or self._is_revenue(right):
                     return m.group(0)
                 cond = Condition(self._resolve(left), op, other_column=self._resolve(right))
                 right.used = True
@@ -353,25 +491,76 @@ class _Run:
 
         count_word = has(lx.COUNT) or has(lx.MORE_ROWS) or (
             self.p.kind == s.TRUE_FALSE and has(lx.ROWS) and not (has(lx.AVG) or has(lx.SUM) or has(lx.MAX) or has(lx.MIN)))
-        maxw, minw = re.search(lx.MAX, masked), re.search(lx.MIN, masked)
-        order = None
-        if maxw or minw or has(lx.MORE_ROWS):
-            order = "ASC" if minw and (not maxw or minw.start() < maxw.start()) else "DESC"
+        # "mas unidades" / "menos pedidos": a superlative on a numeric mention (a larger TOTAL).
+        more = [m for m in re.finditer(lx.MORE_METRIC, masked) if self._numeric_at(m)]
+        less = [m for m in re.finditer(lx.LESS_METRIC, masked) if self._numeric_at(m)]
+        marks = [(m.start(), "DESC") for m in re.finditer(lx.MAX, masked)] + \
+                [(m.start(), "ASC") for m in re.finditer(lx.MIN, masked)] + \
+                [(m.start(), "DESC") for m in re.finditer(lx.MORE_ROWS, masked)] + \
+                [(m.start(), "DESC") for m in more] + [(m.start(), "ASC") for m in less]
+        order = min(marks)[1] if marks else None
         pct_change, period = has(lx.PCT_CHANGE), has(lx.PERIOD)
         percent = has(lx.PERCENT) and not pct_change
 
+        # 'ventas' may mean the number of sales: asked once, before deciding what to count.
+        if not count_word:
+            for m in self.mentions:
+                if not m.used and self._is_revenue(m) and m.target in lx.COUNTABLE_WORDS \
+                        and not re.search(PRODUCT, masked):
+                    if self._revenue_metric(m) == "COUNT":
+                        m.used = True
+                        count_word = True
+                    break
+
         entity, entity_source, ask_date = self._entity(masked)
+        group = {}
+        if self.time_group:
+            grain, source = self.time_group
+            if entity is not None:
+                raise _Need(unrecognized(["una sola agrupacion (por ejemplo 'por mes' o 'por empresa', no ambas)"]))
+            entity = self._role_column("DATE", "fecha")
+            entity_source = source
+            col = self.profile.column(entity)
+            kind = "text" if col.kind == "text" else ("timestamp" if col.dtype.startswith("timestamp") else "date")
+            group = dict(group_time=grain, group_date_kind=kind, group_date_format=col.date_format,
+                         cumulative=has(lx.CUMULATIVE))
         if has(r"(?<![\w@])(?:cuando|when)(?![\w@])"):
             ask_date = True
         filters = conditions + self._value_filters()
+
+        # 'Bogota o Medellin', 'Bogota tiene mas pedidos que Medellin': compare those groups.
+        if entity is None and order:
+            several = next((f for f in filters if f.op == "IN"), None)
+            if several is not None:
+                entity, entity_source = several.column, "which"
+                self.inferred_claim = str(several.value[0])
+
         top_n = re.search(lx.TOP_N, masked)
         limit = int(top_n.group(1)) if top_n else None
 
-        base = dict(filters=filters, date_filters=date_filters, order=order, limit=limit)
+        base = dict(filters=filters, date_filters=date_filters, order=order, limit=limit, **group)
+
+        # HAVING: 'empresas con un promedio de cierre mayor a 100', 'ciudades con mas de 10 pedidos'
+        if self.having:
+            if entity is None:
+                m = re.search(r"(?<![\w@])(?:cuant[oa]s|how\s+many|que|cuales|which)\s+@m(\d+)@", masked)
+                men = self.mentions[int(m.group(1))] if m else None
+                if men is None or men.used or self._kind(men) not in ("text", "date", "any"):
+                    raise _Need(unrecognized(["la agrupacion (por ejemplo: 'cuantas empresas tienen ...')"]))
+                men.used = True
+                entity = self._resolve(men)
+            h = self.having
+            target = self._metric(h["mention"]) if h["mention"] else None
+            cond = Condition("value", h["op"], value=h["value"])
+            if count_word:
+                return QuerySpec(s.GROUP_COUNT, s.GROUPS, h["agg"], target, group_by=entity, having=[cond],
+                                 **{**base, "order": None})
+            return QuerySpec(s.GROUP_AGG, s.GROUP, h["agg"], target, group_by=entity, having=[cond], answer="label",
+                             **{**base, "order": order or "DESC"})
 
         # Counting ---------------------------------------------------------------
         if count_word and not pct_change and not percent:
-            distinct_target = self._distinct_target(masked, entity, entity_source)
+            distinct_target = None if group else self._distinct_target(masked, entity, entity_source)
             if distinct_target:
                 return QuerySpec(s.COUNT_DISTINCT, s.SCALAR, "COUNT_DISTINCT", Metric("column", (distinct_target,)),
                                  **{**base, "order": None})
@@ -384,18 +573,20 @@ class _Run:
 
         numbers = self._numeric_mentions()
         target = self._derived_metric(masked, numbers, pct_change and not period)
-        if target is None and numbers:
-            if len(numbers) > 1 and not (has(lx.COMPARE) or self._joined_by_or(masked)):
-                names = list(dict.fromkeys(self._resolve(m) for m in numbers))
-                if len(names) > 1:
-                    chosen = self._ask("col:metric", "Se mencionan varias columnas numericas. Seleccione la que desea analizar.",
-                                       [(n, n) for n in names])
-                    target = Metric("column", (chosen,))
-            if target is None and not (has(lx.COMPARE) or self._joined_by_or(masked)):
-                target = Metric("column", (self._resolve(numbers[0]),))
+        compare = has(lx.COMPARE) or self._joined_by_or(masked)
+        if target is None and numbers and not compare:
+            metrics = {}
+            for m in numbers:
+                metric = self._metric(m)
+                metrics.setdefault(metric.label(), metric)
+            if len(metrics) > 1:
+                target = self._ask("col:metric", "Se mencionan varias columnas numericas. Seleccione la que desea analizar.",
+                                   [(label, metric) for label, metric in metrics.items()])
+            else:
+                target = next(iter(metrics.values()))
 
         # Comparison of two columns -------------------------------------------------
-        if (has(lx.COMPARE) or self._joined_by_or(masked)) and len(numbers) >= 2 and target is None:
+        if compare and len(numbers) >= 2 and target is None:
             a, b = self._resolve(numbers[0]), self._resolve(numbers[1])
             agg = self._aggregation(masked, allow_superlative=False) or self._ask(
                 "agg", f"Que operacion desea comparar entre {a} y {b}?", [(AGG_LABELS[k], k) for k in ("AVG", "SUM", "MAX", "MIN")])
@@ -432,17 +623,23 @@ class _Run:
 
         intent = {"difference": s.DIFFERENCE, "pct_change": s.PCT_CHANGE}.get(target.kind)
         agg = self._aggregation(masked)
+        revenue = any(self._is_revenue(m) for m in self.mentions)   # also when its formula was written
+        if entity and (more or less or revenue) and self._aggregation(masked, allow_superlative=False) is None:
+            agg = "SUM"      # "la ciudad con mas unidades" / "mayores ingresos" = the largest total
         record = has(lx.RECORD)
+        extra = {"percentile": self.percentile} if agg == "PERCENTILE" else {}
 
-        # A group (company, product...) is involved ----------------------------------
+        # A group (company, product, month...) is involved -------------------------------
         if entity:
-            explicit_agg = agg in ("AVG", "SUM")
-            if record and not explicit_agg and order:
+            explicit_agg = agg in ("AVG", "SUM", "MEDIAN", "PERCENTILE", "STDDEV", "VARIANCE")
+            if record and not explicit_agg and order and not group:
                 return QuerySpec(intent or s.RECORD_EXTREME, s.RECORD, None, target, answer=f"column:{entity}", **base)
             if not explicit_agg:
-                if order:
+                if order and not group:
                     options = [(AGG_LABELS["SUM"], "SUM"), (AGG_LABELS["AVG"], "AVG"),
                                ("Valor de un solo registro (registro extremo)", "RECORD")]
+                elif order:
+                    options = [(AGG_LABELS["SUM"], "SUM"), (AGG_LABELS["AVG"], "AVG")]
                 else:
                     options = [(AGG_LABELS[k], k) for k in ("SUM", "AVG", "MAX", "MIN")]
                 agg = self._ask("agg", f"Que calculo desea por {entity}?", options)
@@ -450,7 +647,7 @@ class _Run:
                     return QuerySpec(intent or s.RECORD_EXTREME, s.RECORD, None, target, answer=f"column:{entity}", **base)
             shape = s.TOP if order else s.GROUP
             return QuerySpec(intent or (s.GROUP_TOP if shape == s.TOP else s.GROUP_AGG), shape, agg, target,
-                             group_by=entity, answer="label" if entity_source != "group" else "value", **base)
+                             group_by=entity, answer="label" if entity_source != "group" else "value", **base, **extra)
 
         # A single row with the extreme value -------------------------------------------
         if order and (ask_date or (record and agg not in ("AVG", "SUM"))):
@@ -468,7 +665,23 @@ class _Run:
             agg = self._ask("agg", f"Que calculo desea sobre {target.label()}?",
                             [(AGG_LABELS[k], k) for k in ("AVG", "SUM", "MAX", "MIN")])
         default_intent = s.AGG_WHERE if (filters or date_filters) else s.AGG_SCALAR
-        return QuerySpec(intent or default_intent, s.SCALAR, agg, target, **{**base, "order": None})
+        return QuerySpec(intent or default_intent, s.SCALAR, agg, target, **{**base, "order": None}, **extra)
+
+    def _explicit_product(self, masked):
+        """'quantity * unit_price' (also × or x) between two numeric columns -> Metric product."""
+        m = re.search(PRODUCT, masked)
+        if not m:
+            return None
+        a, b = self.mentions[int(m.group(1))], self.mentions[int(m.group(2))]
+        if self._kind(a) != "numeric" or self._kind(b) != "numeric" or self._is_revenue(a) or self._is_revenue(b):
+            return None
+        a.used = b.used = True
+        return Metric("product", (self._resolve(a), self._resolve(b)))
+
+    def _numeric_at(self, match):
+        """The 'mas @mN@' match points to a numeric mention."""
+        men = self.mentions[int(re.search(r"@m(\d+)@", match.group(0)).group(1))]
+        return self._kind(men) == "numeric"
 
     # --- pieces ------------------------------------------------------------------
 
@@ -539,6 +752,14 @@ class _Run:
             final = self._ask("pct:final", "Seleccione la columna del valor FINAL de la variacion.", numeric)
             return Metric("pct_change", (base, final))
 
+        product = self._explicit_product(masked)
+        if product:
+            # A formula written in the question ('ingresos (quantity * unit_price)') has priority
+            # over the generic ambiguity of 'ingresos' / 'ventas': those words are only its name.
+            for m in self.mentions:
+                if self._is_revenue(m):
+                    m.used = True
+            return product
         minus = re.search(r"@m(\d+)@\s*(?:-|menos|minus)\s*@m(\d+)@", masked)
         if minus:
             a, b = self.mentions[int(minus.group(1))], self.mentions[int(minus.group(2))]
@@ -557,8 +778,13 @@ class _Run:
         return None
 
     def _aggregation(self, masked, allow_superlative=True):
-        found = [(m.start(), agg) for rx, agg in ((lx.AVG, "AVG"), (lx.SUM, "SUM"))
+        found = [(m.start(), agg) for rx, agg in ((lx.AVG, "AVG"), (lx.SUM, "SUM"), (lx.MEDIAN, "MEDIAN"),
+                                                  (lx.STDDEV, "STDDEV"), (lx.VARIANCE, "VARIANCE"))
                  for m in re.finditer(rx, masked)]
+        pct = re.search(lx.PERCENTILE, masked)
+        if pct and 1 <= int(pct.group(1)) <= 99:
+            self.percentile = int(pct.group(1)) / 100
+            found.append((pct.start(), "PERCENTILE"))
         if found:
             return min(found)[1]
         if allow_superlative:

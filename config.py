@@ -13,6 +13,7 @@ REQUIREMENTS_FILE = PROJECT_ROOT / "requirements.txt"
 # JVM startup warnings. Kept in %TEMP% because the USB drive may be read-only.
 JVM_LOG_FILE = Path(tempfile.gettempdir()) / "PySparkLabAnalyzer" / "spark-jvm.log"
 EXPORT_DIR = PROJECT_ROOT / "exports"
+DATASETS_DIR = PROJECT_ROOT / "datasets"   # optional: its files are listed by number when loading
 EXPORT_FALLBACK_DIR = Path(tempfile.gettempdir()) / "PySparkLabAnalyzer" / "exports"
 
 # --- Environment requirements --------------------------------------------------
@@ -56,6 +57,21 @@ FORMATS_BY_EXTENSION = {
 CSV_SNIFF_BYTES = 64 * 1024
 CSV_DELIMITERS = ",;\t|"
 CSV_INFER_SAMPLING_RATIO = 1.0  # 1.0 = infer types from the whole file (safest)
+
+# --- ETL ----------------------------------------------------------------------
+# Text that means "no value" (compared after trim, lowercase). Turned into NULL.
+NULL_TOKENS = ("", "na", "n/a", "n.a.", "null", "none", "nan", "nil", "-", "--", "?", "sin dato", "sin datos",
+               "sin informacion", "desconocido", "unknown")
+# A text column becomes numeric/date only when at least this share of its non-empty values
+# has that shape; the rest are reported as invalid values (never guessed).
+ETL_CONVERT_MIN_RATIO = 0.9
+# Category normalization ('bogota', 'BOGOTA ', 'Bogotá' -> one spelling) is only looked for
+# in text columns with at most this many distinct raw values.
+ETL_CATEGORY_MAX_DISTINCT = 5000
+# Rules file looked for next to the dataset (optional; rules can also be typed).
+RULES_FILE_NAMES = ("reglas.txt", "{stem}.reglas.txt", "{stem}_reglas.txt")
+RAW_VIEW_NAME = "dataset_original"      # data as read, before the ETL
+REJECTED_VIEW_NAME = "rechazados"       # rows rejected by the ETL, with the reason
 
 # --- Profiling ----------------------------------------------------------------
 PROFILE_SAMPLE_ROWS = 5
@@ -109,5 +125,34 @@ SEMANTIC_ROLES = {
     "ID": {"kind": "any", "aliases": ["id", "codigo", "code", "key", "identificador", "uuid", "nro"]},
     "CATEGORY": {"kind": "text", "aliases": [
         "category", "categoria", "tipo", "type", "clase", "segment", "segmento", "sector", "grupo",
-        "group", "region", "department", "departamento", "familia", "linea"]},
+        "group", "familia", "linea"]},
+    # Dimensions and measures of sales / orders datasets. "dias" alone is NOT an alias:
+    # "cuantos dias ..." counts rows.
+    "CITY": {"kind": "text", "aliases": ["city", "ciudad", "municipio", "town", "localidad"]},
+    "DEPARTMENT": {"kind": "text", "aliases": [
+        "department", "departamento", "state", "provincia", "region", "estado provincia"]},
+    "CHANNEL": {"kind": "text", "aliases": ["channel", "canal", "canal venta", "sales channel"]},
+    "PAYMENT": {"kind": "text", "aliases": [
+        "payment method", "metodo pago", "forma pago", "medio pago", "payment", "pago", "payment type", "tipo pago"]},
+    "CUSTOMER_TYPE": {"kind": "text", "aliases": [
+        "customer type", "tipo cliente", "segmento cliente", "customer segment", "client type"]},
+    "STATUS": {"kind": "text", "aliases": [
+        "status", "estado", "estado pedido", "order status", "situacion", "estatus"]},
+    "DISCOUNT": {"kind": "numeric", "aliases": [
+        "discount", "descuento", "discount pct", "porcentaje descuento", "dcto", "desc"]},
+    "DAYS": {"kind": "numeric", "aliases": [
+        "shipping days", "dias envio", "dias entrega", "delivery days", "tiempo entrega", "lead time", "dias despacho"]},
+    "RETURNS": {"kind": "numeric", "aliases": [
+        "returned qty", "returned quantity", "returns", "devoluciones", "cantidad devuelta", "unidades devueltas"]},
+    "AGE": {"kind": "numeric", "aliases": ["age", "edad", "customer age", "edad cliente"]},
+}
+# What each role is for the OLAP model (shown in "Ver esquema"; never used to guess).
+ROLE_CLASS = {
+    "DATE": "tiempo", "ID": "identificador",
+    "COMPANY": "dimension", "PRODUCT": "dimension", "CATEGORY": "dimension", "NAME": "atributo",
+    "CITY": "dimension", "DEPARTMENT": "dimension", "CHANNEL": "dimension", "PAYMENT": "dimension",
+    "CUSTOMER_TYPE": "dimension", "STATUS": "atributo",
+    "OPEN": "medida", "CLOSE": "medida", "HIGH": "medida", "LOW": "medida", "VOLUME": "medida",
+    "QUANTITY": "medida", "PRICE": "medida", "AMOUNT": "medida", "TOTAL": "medida", "DISCOUNT": "medida",
+    "DAYS": "medida", "RETURNS": "medida", "AGE": "medida",
 }

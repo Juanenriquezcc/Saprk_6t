@@ -26,10 +26,11 @@ pytestmark = [pytest.mark.slow,
 USB_EXCLUDE_DIRS = [".venv", "exports", ".pytest_cache"]
 DATASET = r"tests\data\stocks_small.csv"
 APP_INPUT = ["",                                                        # CSV options OK
+             "",                                                        # ETL: no lab rules
              "¿Cuál empresa presentó el mayor volumen total negociado?", "",
              ":q",                                                      # leave lab mode
-             "8", "SELECT COUNT(*) AS n FROM dataset;", ":q",           # Spark SQL
-             "0"]
+             "7", "SELECT COUNT(*) AS n FROM dataset;", ":q",           # Spark SQL (workshop menu)
+             "0", "n"]                                                  # exit without exporting
 
 
 def copy_to_usb(target):

@@ -55,6 +55,11 @@ def metric_sql(metric):
     if metric.kind == "pct_change":
         base, final = cols
         return f"(({final} - {base}) / NULLIF({base}, 0) * 100)"
+    if metric.kind == "product":
+        return f"({cols[0]} * {cols[1]})"
+    if metric.kind == "product_discount":
+        discount = cols[2] if metric.discount_scale == 1 else f"{cols[2]} / {metric.discount_scale}"
+        return f"({cols[0]} * {cols[1]} * (1 - {discount}))"
     return cols[0]
 
 
@@ -91,10 +96,33 @@ def value_alias(spec):
         name = f"{spec.target.columns[0]}_menos_{spec.target.columns[1]}"
     elif spec.target.kind == "pct_change":
         name = "variacion_pct"
+    elif spec.target.kind in ("product", "product_discount"):
+        name = "ingresos" if spec.target.kind == "product" else "ingresos_con_descuento"
     else:
         name = spec.target.columns[0]
-    prefix = f"{agg.lower()}_" if agg else ""   # RECORD has no aggregation
+    prefix = AGG_PREFIX.get(agg, f"{agg.lower()}_") if agg else ""   # RECORD has no aggregation
+    if agg == "PERCENTILE":
+        prefix = f"percentil_{format(spec.percentile * 100, 'g').replace('.', '_')}_"
     return f"{prefix}{_slug(name)}"
+
+
+AGG_PREFIX = {"MEDIAN": "mediana_", "STDDEV": "desviacion_", "VARIANCE": "varianza_"}
+AGG_SQL = {"MEDIAN": "percentile({m}, 0.5)", "STDDEV": "STDDEV({m})", "VARIANCE": "VARIANCE({m})"}
+TIME_SQL = {   # group expression and column name of each time grain
+    "year": ("year({d})", "anio"),
+    "quarter": ("concat(year({d}), '-T', quarter({d}))", "trimestre"),
+    "month": ("date_format({d}, 'yyyy-MM')", "mes"),
+    "day": ("{d}", "dia"),
+}
+
+
+def group_sql(spec):
+    """(SELECT expression, result column name) of the grouping."""
+    if not spec.group_time:
+        return ident(spec.group_by), spec.group_by
+    expr, name = TIME_SQL[spec.group_time]
+    d = date_expr(spec.group_by, spec.group_date_kind, spec.group_date_format)
+    return f"{expr.format(d=d)} AS {name}", name
 
 
 def aggregate_sql(spec):
@@ -114,6 +142,10 @@ def aggregate_sql(spec):
         d = ident(spec.period_column)
         first, last = f"min_by({m}, {d})", f"max_by({m}, {d})"
         return f"(({last} - {first}) / NULLIF({first}, 0) * 100)"
+    if agg == "PERCENTILE":
+        return f"percentile({metric_sql(spec.target)}, {spec.percentile})"
+    if agg in AGG_SQL:
+        return AGG_SQL[agg].format(m=metric_sql(spec.target))
     return f"{agg}({metric_sql(spec.target)})"
 
 
@@ -170,15 +202,30 @@ def build_sql(spec):
     if spec.shape == s.SCALAR:
         return BuiltQuery(f"SELECT {value} AS {alias}\nFROM {view}{where_sql(spec)}", value_column=alias)
 
-    g = ident(spec.group_by)
+    g_select, g_name = group_sql(spec)
+    g = g_select.rsplit(" AS ", 1)[0] if spec.group_time else g_select
+    g_order = ident(g_name)
     having = ""
     if spec.having:
         having = "\nHAVING " + " AND ".join(f"{alias} {h.op} {literal(h.value)}" for h in spec.having)
-    order = spec.order or "DESC"
+    grouped = f"SELECT {g_select},\n       {value} AS {alias}\nFROM {view}{where_sql(spec)}\nGROUP BY {g}{having}"
+
+    if spec.shape == s.GROUPS:
+        return BuiltQuery(f"SELECT COUNT(*) AS total_grupos\nFROM (\n{grouped}\n) t", value_column="total_grupos")
+
     limit = spec.limit or (1 if spec.shape == s.TOP else config.MAX_GROUP_ROWS)
-    sql = (f"SELECT {g},\n       {value} AS {alias}\nFROM {view}{where_sql(spec)}\nGROUP BY {g}{having}\n"
-           f"ORDER BY {alias} {order} NULLS LAST, {g} ASC\nLIMIT {limit}")
-    return BuiltQuery(sql, value_column=alias, label_column=spec.group_by)
+    if spec.cumulative:
+        # Running total over the periods (window function over the small grouped result).
+        sql = (f"SELECT {g_order}, {alias},\n       SUM({alias}) OVER (ORDER BY {g_order} "
+               f"ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS acumulado\nFROM (\n{grouped}\n) t\n"
+               f"ORDER BY {g_order} ASC\nLIMIT {limit}")
+        return BuiltQuery(sql, value_column=alias, label_column=g_name)
+    if spec.group_time and spec.shape == s.GROUP and not spec.order:
+        order_by = f"{g_order} ASC"          # a time series reads in date order
+    else:
+        order_by = f"{alias} {spec.order or 'DESC'} NULLS LAST, {g_order} ASC"
+    sql = f"{grouped}\nORDER BY {order_by}\nLIMIT {limit}"
+    return BuiltQuery(sql, value_column=alias, label_column=g_name)
 
 
 def build_tie_check(spec, built, top_value):

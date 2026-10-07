@@ -14,8 +14,11 @@ from app.text import normalize
 
 NO_MATCH = "Ninguna opcion coincide con el resultado calculado."
 AGG_TEXT = {"SUM": "suma", "AVG": "promedio", "MAX": "maximo", "MIN": "minimo", "COUNT": "conteo de registros",
-            "COUNT_DISTINCT": "conteo de valores distintos", "PERCENT": "porcentaje", "PERIOD_CHANGE": "variacion % del periodo"}
-AGG_WITH_ARTICLE = {"SUM": "la suma", "AVG": "el promedio", "MAX": "el maximo", "MIN": "el minimo"}
+            "COUNT_DISTINCT": "conteo de valores distintos", "PERCENT": "porcentaje", "PERIOD_CHANGE": "variacion % del periodo",
+            "MEDIAN": "mediana", "PERCENTILE": "percentil", "STDDEV": "desviacion estandar", "VARIANCE": "varianza"}
+AGG_WITH_ARTICLE = {"SUM": "la suma", "AVG": "el promedio", "MAX": "el maximo", "MIN": "el minimo",
+                    "MEDIAN": "la mediana", "PERCENTILE": "el percentil", "STDDEV": "la desviacion estandar",
+                    "VARIANCE": "la varianza"}
 
 
 @dataclass
@@ -41,6 +44,12 @@ class Evidence:
     matched_option: str = None
     claim: str = None
     verdict: str = None           # VERDADERO | FALSO
+    claim_op: str = "="
+    source: str = "pregunta"      # pregunta | analisis | sql
+    selected_answer: str = None   # answer marked by the student
+    correct_answer: str = None    # answer computed by the program
+    validation: str = None        # CORRECTA | INCORRECTA | SIN RESPUESTA | NO DETERMINADA | NO RESUELTA
+    validation_note: str = None
     correct_value: object = None
     spec: dict = None
     result_types: list = field(default_factory=list)
@@ -60,7 +69,7 @@ def evidence_for_sql(label, result, warnings=()):
     if result.truncated:
         notes.append(f"Se muestran solo las primeras {shown} filas. Agregue LIMIT o filtros para acotar.")
     return Evidence(
-        question=label, question_type=s.OPEN, intent=s.MANUAL_SQL, columns_used=[], filters=[], sql=result.sql,
+        source="sql", question=label, question_type=s.OPEN, intent=s.MANUAL_SQL, columns_used=[], filters=[], sql=result.sql,
         result_columns=result.columns, result_rows=[[_plain(v) for v in row] for row in result.rows],
         value=_plain(result.rows[0][0]) if shown == 1 and len(result.columns) == 1 else None,
         answer=text, result_text=text, interpretation="MANUAL_SQL: consulta escrita por el usuario (solo lectura).",
@@ -118,11 +127,32 @@ def run_spec(spark, parsed, spec, known_columns=(), number=None):
         if note:
             evidence.warnings.append(note)
     elif spec.question_type == s.TRUE_FALSE:
-        ok = any(_value_matches(spec.claim, v) for v in [primary, *alternates])
-        evidence.verdict = "VERDADERO" if ok else "FALSO"
+        evidence.claim_op = spec.claim_op
+        if spec.claim_op == "=":
+            ok = any(_value_matches(spec.claim, v) for v in [primary, *alternates])
+        else:
+            ok = compare_claim(primary, spec.claim_op, spec.claim)
         evidence.correct_value = answer_text
-        evidence.answer = evidence.verdict
+        if ok is None:
+            evidence.answer = "NO DETERMINADO"
+            evidence.warnings.append(f"No se puede comparar el resultado con '{spec.claim}' (numero ambiguo o resultado no numerico).")
+        else:
+            evidence.verdict = "VERDADERO" if ok else "FALSO"
+            evidence.answer = evidence.verdict
     return evidence
+
+
+_OPS = {">": lambda a, b: a > b, "<": lambda a, b: a < b, ">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b}
+
+
+def compare_claim(value, op, claim):
+    """'el promedio es mayor a 500000': True/False, or None when it cannot be decided
+    (the written number has two readings that give different verdicts, or no number)."""
+    if not isinstance(value, (int, float, Decimal)) or isinstance(value, bool):
+        return None
+    readings = read_number(claim) or _embedded_number(claim)
+    verdicts = {_OPS[op](float(value), r.value) for r in readings}
+    return verdicts.pop() if len(verdicts) == 1 else None
 
 
 # --- result -> answer ------------------------------------------------------------
@@ -139,7 +169,7 @@ def _extract(spec, built, result, warnings):
     if spec.shape == s.ROWS:
         return None, [], f"{len(result.rows)} registro(s) mostrado(s)"
 
-    if spec.shape == s.SCALAR:
+    if spec.shape in (s.SCALAR, s.GROUPS):
         value = result.first(built.value_column)
         if value is None:
             warnings.append("El resultado es NULL: no hay datos que cumplan las condiciones.")
@@ -292,6 +322,9 @@ def explain(spec):
         what = f"se calcula {', '.join(spec.stats)} de: {', '.join(spec.columns)} (una sola consulta)"
     elif spec.shape == s.ROWS:
         what = f"se muestran los registros que cumplen las condiciones (maximo {spec.limit or config.MAX_DISPLAY_ROWS})"
+    elif spec.shape == s.GROUPS:
+        base = "registros" if agg == "COUNT" else f"{AGG_WITH_ARTICLE.get(agg, agg)} de {m}"
+        what = f"se cuentan los grupos de {spec.group_label()} cuyo valor ({base}) cumple la condicion"
     elif agg == "COUNT":
         what = "se cuentan los registros"
     elif agg == "COUNT_DISTINCT":
@@ -306,12 +339,16 @@ def explain(spec):
         what = f"se compara {AGG_WITH_ARTICLE[agg]} de {spec.comparison[0]} con {AGG_WITH_ARTICLE[agg]} de {spec.comparison[1]}"
     elif spec.shape == s.RECORD:
         what = f"se busca el registro con {'mayor' if spec.order != 'ASC' else 'menor'} {m}"
+    elif agg == "PERCENTILE":
+        what = f"se calcula el percentil {format(spec.percentile * 100, 'g')} de {m}"
     else:
         what = f"se calcula {AGG_WITH_ARTICLE[agg]} de {m}"
     if spec.shape == s.GROUP:
-        what += f" para cada {spec.group_by}"
+        what += f" para cada {spec.group_label()}"
+        if spec.cumulative:
+            what += ", con el total acumulado"
     elif spec.shape == s.TOP:
-        what += f" para cada {spec.group_by} y se toma el {'mayor' if spec.order != 'ASC' else 'menor'}"
+        what += f" para cada {spec.group_label()} y se toma el {'mayor' if spec.order != 'ASC' else 'menor'}"
         if spec.limit and spec.limit > 1:
             what += f" ({spec.limit} primeros)"
     filters = spec.filter_labels()

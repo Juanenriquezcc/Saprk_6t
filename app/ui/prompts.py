@@ -75,3 +75,8 @@ def ask_int(prompt, default, low=1, high=100):
 
 def confirm(prompt):
     return ask(f"{prompt} [s/N]: ").strip().lower() in ("s", "si", "y", "yes")
+
+
+def confirm_yes(prompt):
+    """Yes unless the user says no (Enter = yes)."""
+    return ask(f"{prompt} [S/n]: ").strip().lower() not in ("n", "no")

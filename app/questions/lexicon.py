@@ -11,12 +11,19 @@ COUNT = W + r"(?:cuant[oa]s|how\s+many|conteo|contar|count|numero\s+de|cantidad\
 DISTINCT = W + r"(?:distint[oa]s|diferentes|unic[oa]s|distinct|unique)" + E
 MAX = W + r"(?:maxim[oa]s?|max|mayor(?:es)?|mas\s+alt[oa]s?|mas\s+grande|highest|largest|maximum|biggest|greatest|top)" + E
 MIN = W + r"(?:minim[oa]s?|min|menor(?:es)?|mas\s+baj[oa]s?|mas\s+pequen[oa]s?|lowest|smallest|minimum|least)" + E
+MEDIAN = W + r"(?:mediana|median)" + E
+PERCENTILE = W + r"(?:percentil|percentile|p)\s*(\d{1,2})" + E
+STDDEV = W + r"(?:desviacion(?:\s+(?:estandar|tipica))?|std|stddev|standard\s+deviation)" + E
+VARIANCE = W + r"(?:varianza|variance)" + E
 
-ROW_WORDS = r"(?:registros?|filas?|rows?|records?|observaciones|entradas|datos|transacciones|operaciones|veces|dias|days)"
+ROW_WORDS = (r"(?:registros?|filas?|rows?|records?|observaciones|entradas|datos|transacciones|operaciones|veces|dias|days|"
+             r"pedidos?|ordenes|orders?|compras|envios|facturas)")
 ROWS = W + ROW_WORDS + E
 # Count of rows: "cuantos registros", "cantidad de filas", "numero de registros", "total de registros".
 COUNT_ROWS_PHRASE = W + r"(?:cantidad|numero|total|conteo)\s+de\s+(?:los\s+)?" + ROW_WORDS + E
 MORE_ROWS = W + r"mas\s+" + ROW_WORDS + E                    # "la empresa con mas registros"
+MORE_METRIC = W + r"(?:mas|more|most)\s+(?:de\s+)?@m\d+@"           # "mas unidades" (a numeric mention)
+LESS_METRIC = W + r"(?:menos|less|fewer|least)\s+(?:de\s+)?@m\d+@"
 
 RECORD = W + (r"(?:registro|fila|row|record|dia|day|sesion|jornada|cuando|when|individual|un\s+solo|"
               r"una\s+sola|single|transaccion|operacion|registro\s+individual)") + E
@@ -37,6 +44,29 @@ WHICH = (W + r"(?:cual(?:es)?|que|which|what|quien)(?:\s+(?:es|fue|son|fueron|is
 # "la empresa con mayor ...", "the company with the highest ..."
 ENTITY_WITH = r"@m(\d+)@\s+(?:con|que\s+tuvo|que\s+tiene|que\s+presento|que\s+registro|with|that\s+had|having)" + E
 TOP_N = W + r"(?:top|las|los|primer[oa]s|first)\s+(\d{1,2})\s+(?:@m\d+@|" + ROW_WORDS + ")"
+
+# Time grains: "por mes", "en que ano", "mensual", "trimestre". 'dia' only with "por"/"diario":
+# "que dia ..." asks for the date of a record, not for a grouping.
+TIME_GROUP = [
+    (W + r"(?:por|cada|por\s+cada|de\s+cada|para\s+cada|en\s+cada)\s+(?:el\s+|la\s+)?(mes|ano|anio|trimestre|dia)(?:s|es)?" + E, "group"),
+    (W + r"(?:en\s+que|en\s+cual|que|cual)(?:\s+(?:fue|es))?(?:\s+(?:el|la))?\s+(mes|ano|anio|trimestre)" + E, "which"),
+    (W + r"(mensual|anual|trimestral)(?:es|mente)?" + E, "group"),   # not "diario": "rango diario" is per row
+]
+TIME_WORDS = {"mes": "month", "mensual": "month", "ano": "year", "anio": "year", "anual": "year",
+              "trimestre": "quarter", "trimestral": "quarter", "dia": "day"}
+CUMULATIVE = W + r"(?:acumulad[oa]s?|acumulativ[oa]|running\s+total|cumulative)" + E
+# HAVING: "con mas de 100 pedidos" (count of rows per group)
+HAVING_COUNT = (W + r"(?:con|tienen|tiene|tuvieron|tuvo|registran|registra|que\s+tienen|que\s+tuvieron)?\s*"
+                r"(mas\s+de|menos\s+de|al\s+menos|como\s+minimo|como\s+maximo)\s+(\d[\d.,]*)\s+" + ROW_WORDS + E)
+HAVING_COUNT_OPS = {"mas de": ">", "menos de": "<", "al menos": ">=", "como minimo": ">=", "como maximo": "<="}
+# HAVING on an aggregate: "con un promedio de cierre mayor a 100" / "cuyo cierre promedio supera 100"
+HAVING_AGG_WORDS = {"promedio": "AVG", "media": "AVG", "suma": "SUM", "total": "SUM", "maximo": "MAX", "minimo": "MIN"}
+# Comparative true/false claim: "... es mayor a 500000"
+CLAIM_COMPARATIVE = [
+    (r"(?:mayor|superior|mas)\s+(?:a|que|al|de)", ">"), (r"(?:menor|inferior|menos)\s+(?:a|que|al|de)", "<"),
+    (r"(?:al\s+menos|como\s+minimo|mayor\s+o\s+igual\s+(?:a|que))", ">="),
+    (r"(?:como\s+maximo|a\s+lo\s+sumo|menor\s+o\s+igual\s+(?:a|que))", "<="),
+]
 
 # Comparison operators, longest first. Value = SQL operator.
 # "al" is the Spanish contraction a + el ("superior al precio de apertura").
@@ -68,13 +98,21 @@ GENERIC_WORDS = {
     "valor": ("PRICE", "AMOUNT", "TOTAL"), "valores": ("PRICE", "AMOUNT", "TOTAL"), "value": ("PRICE", "AMOUNT", "TOTAL"),
     "monto": ("AMOUNT", "TOTAL"), "importe": ("AMOUNT", "TOTAL"), "amount": ("AMOUNT", "TOTAL"),
     "cotizacion": ("PRICE",),
+    # Revenue concept: an existing column or a formula (quantity x price ...). Always asked
+    # when there is more than one possibility.
+    "ingresos": ("AMOUNT", "TOTAL"), "ingreso": ("AMOUNT", "TOTAL"), "revenue": ("AMOUNT", "TOTAL"),
+    "facturacion": ("AMOUNT", "TOTAL"), "ventas": ("AMOUNT", "TOTAL"), "sales": ("AMOUNT", "TOTAL"),
+    "recaudo": ("AMOUNT", "TOTAL"), "valor vendido": ("AMOUNT", "TOTAL"),
 }
+REVENUE_WORDS = {"ingresos", "ingreso", "revenue", "facturacion", "ventas", "sales", "recaudo", "valor vendido"}
+COUNTABLE_WORDS = {"ventas", "sales"}     # "mas ventas" may also mean "more sales rows"
 # Role aliases containing these words ('precio maximo') are ambiguous in questions: the
 # word may be the aggregation. They are read as the role (HIGH/LOW) only when another
 # operation word remains in the question; otherwise the question is scanned without them.
 OPERATION_WORDS = {"max", "min", "maximo", "minimo", "alto", "bajo", "total"}
 OP_ALIAS_HEADS = {"precio", "price"}        # only 'precio maximo', 'price high'... qualify
-OPERATION_KEYWORDS = [AVG, SUM, COUNT, MAX, MIN, DIFFERENCE, PCT_CHANGE, PERCENT]
+OPERATION_KEYWORDS = [AVG, SUM, COUNT, MAX, MIN, DIFFERENCE, PCT_CHANGE, PERCENT, MEDIAN, STDDEV, VARIANCE]
 # Role aliases that are also operation words: never read as a column mention in questions.
 ROLE_WORDS_EXCLUDED = {"max", "min", "maximo", "minimo", "alto", "bajo", "total", "valor", "precio", "price",
-                       "monto", "importe", "amount", "type", "time", "key", "code", "group", "stock", "accion"}
+                       "monto", "importe", "amount", "type", "time", "key", "code", "group", "stock", "accion",
+                       "ingreso", "ingresos", "revenue", "venta", "ventas", "sales", "desc", "pago"}
