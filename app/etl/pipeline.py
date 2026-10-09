@@ -5,11 +5,13 @@
   VALIDATE  app/etl/validator.py + the lab rules (app/etl/rules.py)
   LOAD      here: the clean data is cached and registered as the `dataset` view; the data
             as read stays in `dataset_original` and the rejected rows (with their reason)
-            in `rechazados`, so every number of the report can be checked with SQL.
+            in `rechazados`, so every number of the report can be checked with SQL. A catalog
+            table uses its own names instead (etl_views).
 
 Every decision the data cannot settle goes through `decide(Decision) -> value`
 (the terminal asks the user; tests pass fixed answers). Nothing is chosen silently.
 """
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -40,6 +42,8 @@ class EtlReport:
     null_counts: dict = field(default_factory=dict)       # filled from the profile of the clean data
     seconds: float = 0.0
     df: object = None                                     # clean DataFrame (not exported)
+    views: tuple = (config.VIEW_NAME, config.RAW_VIEW_NAME, config.REJECTED_VIEW_NAME)   # see etl_views()
+    similar_values: list = field(default_factory=list)    # 'Laptop Pro14' / 'Laptop Pro 14': reported, not merged
 
     @property
     def changed(self):
@@ -74,24 +78,34 @@ class EtlReport:
             "origen_reglas": self.rules_source,
             "nulos_por_columna": self.null_counts,
             "avisos": self.warnings,
-            "vistas_sql": {"limpio": config.VIEW_NAME, "original": config.RAW_VIEW_NAME,
-                           "rechazados": config.REJECTED_VIEW_NAME},
+            "posibles_equivalencias_no_aplicadas": self.similar_values,
+            "vistas_sql": dict(zip(("limpio", "original", "rechazados"), self.views)),
             "segundos": round(self.seconds, 2),
         }
 
 
-def run(spark, load, rules=(), decide=None, rules_source=None):
-    """Runs the ETL over `load.df` (already read and cached). Returns EtlReport."""
+def etl_views(view=config.VIEW_NAME):
+    """(clean, original, rejected) view names. `dataset` keeps its historic names; a catalog
+    table 'pedidos' gets pedidos / pedidos_original / pedidos_rechazados."""
+    if view == config.VIEW_NAME:
+        return config.VIEW_NAME, config.RAW_VIEW_NAME, config.REJECTED_VIEW_NAME
+    return view, f"{view}_original", f"{view}_rechazados"
+
+
+def run(spark, load, rules=(), decide=None, rules_source=None, view=config.VIEW_NAME):
+    """Runs the ETL over `load.df` (already read and cached) and registers the views
+    etl_views(view). Returns EtlReport."""
     from pyspark.sql import functions as F
 
     start = time.perf_counter()
     raw = load.df
     decide = decide or _no_decisions
     rules = list(rules)
-    report = EtlReport(original_rows=load.rows, valid_rows=load.rows, rules=rules, rules_source=rules_source)
+    report = EtlReport(original_rows=load.rows, valid_rows=load.rows, rules=rules, rules_source=rules_source,
+                       views=etl_views(view))
 
     # --- TRANSFORM -----------------------------------------------------------------
-    transformations, decisions = tf.detect(raw, load)
+    transformations, decisions, report.similar_values = tf.detect(raw, load)
     if transformations:
         choice = decide(Decision("transform", "Se proponen estas transformaciones de limpieza. Aplicarlas?",
                                  [("Aplicar todas (recomendado)", "all"), ("No aplicar ninguna", "none")],
@@ -107,6 +121,7 @@ def run(spark, load, rules=(), decide=None, rules_source=None):
         df = tf.apply(raw, transformations, report.decisions)
     except ValueError as exc:
         raise AppError(str(exc)) from exc
+    df = _equivalences(df, [r for r in rules if r.kind == rl.EQUIVALENCE], decide, report)
 
     for rule in (r for r in rules if r.kind == rl.DERIVED):
         if rule.name.lower() in (c.lower() for c in df.columns):
@@ -165,13 +180,81 @@ def run(spark, load, rules=(), decide=None, rules_source=None):
     else:
         clean = raw
     checked.unpersist()
-    raw.createOrReplaceTempView(config.RAW_VIEW_NAME)
-    rejected.createOrReplaceTempView(config.REJECTED_VIEW_NAME)
-    clean.createOrReplaceTempView(config.VIEW_NAME)
+    clean_view, raw_view, rejected_view = report.views
+    raw.createOrReplaceTempView(raw_view)
+    rejected.createOrReplaceTempView(rejected_view)
+    clean.createOrReplaceTempView(clean_view)
     report.df = clean
     report.columns = list(clean.columns)
     report.seconds = time.perf_counter() - start
     return report
+
+
+# A code or reference: no spaces, at least one digit, letters/digits joined by - _ . / ('R001', 'R-001').
+CODE = r"(?=[^\s]*\d)[A-Za-z0-9]+(?:[-_./][A-Za-z0-9]+)*"
+CODE_COLUMN_RATIO = 0.8     # share of code-shaped values that makes a column a code column
+
+
+def _equivalences(df, rules, decide, report):
+    """Equivalences of the case ('equivalencia: product: Laptop Pro14 -> Laptop Pro 14'): each one is
+    shown with its counts and applied only when the user confirms it. Never on identifiers, codes
+    or non-text columns. Matching ignores case, accents and outer/double spaces (as the categories)."""
+    if not rules:
+        return df
+    from pyspark.sql import functions as F
+    from app.schema.profiler import ID_TOKENS
+    from app.text import name_tokens
+
+    types = dict(df.dtypes)
+    columns = sorted({r.name for r in rules})
+    for r in rules:
+        if r.name not in types:
+            raise AppError(f"La equivalencia '{r.text}' usa la columna '{r.name}', que no existe.",
+                           "Columnas: " + ", ".join(c for c in df.columns if not c.startswith(tf.RAW_PREFIX)))
+        if types[r.name] != "string" or set(name_tokens(r.name)) & ID_TOKENS:
+            raise AppError(f"La equivalencia '{r.text}' no se aplica: '{r.name}' no es una columna de texto "
+                           "descriptivo (identificadores, codigos y numeros no se unifican).")
+    # One aggregation: rows of every spelling, and how unique each column is (codes are near-unique).
+    exprs = [F.count_if(tf.text_key(r.name) == F.lit(tf.category_key(v))).alias(f"e{i}_{side}")
+             for i, r in enumerate(rules) for side, v in enumerate(r.values)]
+    exprs += [e for j, c in enumerate(columns) for e in (F.approx_count_distinct(F.col(tf.q(c))).alias(f"d{j}"),
+                                                         F.count(F.col(tf.q(c))).alias(f"n{j}"),
+                                                         F.count_if(F.trim(F.col(tf.q(c))).rlike(f"^{CODE}$")).alias(f"c{j}"))]
+    stats = df.agg(*exprs).first()
+    for j, c in enumerate(columns):
+        if stats[f"n{j}"] > 1 and stats[f"d{j}"] >= config.ID_MIN_UNIQUE_RATIO * stats[f"n{j}"]:
+            raise AppError(f"La columna '{c}' tiene un valor distinto en casi cada registro (identificador o "
+                           "codigo): no se le aplican equivalencias.")
+        # Repeated rows can lower the unique ratio, so the shape of the values decides too (F2).
+        if stats[f"n{j}"] and stats[f"c{j}"] >= CODE_COLUMN_RATIO * stats[f"n{j}"]:
+            raise AppError(f"La columna '{c}' contiene codigos o referencias ({stats[f'c{j}']} de {stats[f'n{j}']} "
+                           "valores tienen forma de codigo): no se le aplican equivalencias.")
+    for r in rules:
+        coded = [v for v in r.values if re.fullmatch(CODE, v.strip())]
+        if coded:
+            raise AppError(f"La equivalencia '{r.text}' no se aplica: {coded[0]!r} tiene forma de codigo "
+                           "(letras y digitos sin espacios). Los codigos distintos nunca se unifican.")
+    for i, r in enumerate(rules):
+        (old, new), found, target = r.values, stats[f"e{i}_0"], stats[f"e{i}_1"]
+        key = f"equivalence:{r.name}:{old}"
+        if not found:
+            report.warnings.append(f"Equivalencia sin efecto: {old!r} no aparece en {r.name}.")
+            continue
+        details = [f"{r.name}: {old!r} ({found} registro(s)) -> {new!r} ({target} registro(s))"]
+        if not target:
+            details.append(f"Atencion: {new!r} no aparece en los datos; sera un valor nuevo.")
+        report.decisions[key] = decide(Decision(
+            key, f"Equivalencia del caso: {old!r} y {new!r} son el mismo valor de {r.name}?",
+            [("Si: unificar (reemplazar por " + repr(new) + ")", True), ("No: dejarlos separados", False)], details))
+        if not report.decisions[key]:
+            report.warnings.append(f"Equivalencia no confirmada (no aplicada): {r.name}: {old!r} -> {new!r}.")
+            continue
+        df = df.withColumn(r.name, F.when(tf.text_key(r.name) == F.lit(tf.category_key(old)), F.lit(new))
+                           .otherwise(F.col(tf.q(r.name))))
+        report.transformations.append(tf.Transformation(
+            "equivalence", r.name, f"{r.name}: equivalencia confirmada {old!r} -> {new!r}", found, details,
+            {"from": old, "to": new}))
+    return df
 
 
 def _no_decisions(decision):

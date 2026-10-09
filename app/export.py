@@ -123,10 +123,17 @@ def question_text(e):
     if e.options:
         lines += ["", "Opciones:"] + [f"  {letter}) {text}" for letter, text in e.options]
     lines += ["", f"Respuesta correcta:     {e.correct_answer or '-'}",
-              f"Respuesta seleccionada: {e.selected_answer or '-'}", "", f"Validacion: {e.validation}"]
+              f"Respuesta seleccionada: {e.selected_answer or '-'}"]
+    if e.material_option:
+        lines.append(f"Opcion marcada en el material (no usada para validar): {e.material_option}")
+    lines += ["", f"Validacion: {e.validation}"]
+    lines += [f"Aclaracion: {c}" for c in e.clarifications]
     if e.validation_note:
         lines.append(f"Explicacion: {e.validation_note}")
     lines.append(f"Interpretacion: {e.interpretation}")
+    if e.tables_used:
+        lines.append(f"Tablas: {', '.join(e.tables_used)}")
+        lines += [f"JOIN: {j}" for j in e.joins] + [f"Relacion confirmada: {r}" for r in e.relations_used]
     lines += [f"Advertencia: {w}" for w in e.warnings]
     lines += [f"Fecha y hora: {e.timestamp}", ""]
     return "\n".join(lines)

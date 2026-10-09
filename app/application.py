@@ -2,14 +2,16 @@
 import config
 from app.errors import AppError
 from app.session import LabSession
-from app.spark.loader import CsvOptions, detect_format, load_dataset, resolve_path, sniff_csv
+from app.spark.loader import detect_format, load_dataset, resolve_path, sniff_csv
 from app.spark.session import get_spark, stop_spark
+from app.catalog import DatasetCatalog
+from app.ui import datasets as datasets_ui
 from app.ui import etl as etl_ui
 from app.ui import lab_mode, render, workshop
 from app.ui.prompts import ask
 
 EXIT_WORDS = {"salir", "exit", "q"}
-FORMATS = ("csv", "json", "parquet")
+MANY_WORDS = {"varios", "multiples", "multiple", "+"}      # several datasets in the same workshop
 
 
 def show_error(exc):
@@ -28,10 +30,15 @@ class Application:
             load = self._load(dataset)
             if load is None:
                 return 0
-            render.load_summary(load, None)
-            report = etl_ui.run(self.spark, load)
-            print("Analizando columnas...")
-            session = LabSession.start(self.spark, load, report)
+            if load == "varios":
+                session = self._start_many()
+                if session is None:
+                    return 0
+            else:
+                render.load_summary(load, None)
+                report = etl_ui.run(self.spark, load)
+                print("Analizando columnas...")
+                session = LabSession.start(self.spark, load, report)
             if lab:
                 lab_mode.run(session)
             workshop.run(session)
@@ -51,6 +58,8 @@ class Application:
             pending = None
             if raw.strip().lower() in EXIT_WORDS:
                 return None
+            if raw.strip().lower() in MANY_WORDS:
+                return "varios"
             try:
                 path = resolve_path(raw)
                 fmt = detect_format(path) or self._ask_format()
@@ -78,26 +87,27 @@ class Application:
             print(f"\nDatasets en la carpeta {config.DATASETS_DIR.name}:")
             for i, f in enumerate(found, 1):
                 print(f"  {i}. {f.name}")
-        raw = ask("\nIngrese la ruta del dataset" + (" o su numero" if found else "") + " (o 'salir'): ")
+        print("\nUn dataset: escriba su ruta. Varios datasets en el mismo taller: escriba 'varios'.")
+        raw = ask("Ingrese la ruta del dataset" + (" o su numero" if found else "") + " (o 'varios' / 'salir'): ")
         if raw.strip().isdigit() and 1 <= int(raw.strip()) <= len(found):
             return str(found[int(raw.strip()) - 1])
         return raw
 
+    def _start_many(self):
+        """Several datasets: each one registered in the catalog; the first is the active one."""
+        print("Iniciando Spark...")
+        self.spark = get_spark(quiet=not self.debug)
+        catalog = DatasetCatalog()
+        if not datasets_ui.register_many(self.spark, catalog):
+            print("No se registro ningun dataset.")
+            return None
+        first = next(iter(catalog))
+        print(f"\nDatasets del taller: {', '.join(e.alias for e in catalog)}. Dataset activo: {first.alias}.")
+        print("Las preguntas buscan automaticamente sus datasets (menu 10 para cambiarlo).")
+        return LabSession.from_catalog(self.spark, catalog, first.alias)
+
     def _ask_format(self):
-        print("\nNo se pudo determinar el formato del archivo.")
-        while True:
-            choice = ask("Elija el formato: 1) CSV  2) JSON  3) Parquet: ").strip()
-            if choice in ("1", "2", "3"):
-                return FORMATS[int(choice) - 1]
-            print("Opcion no valida.")
+        return datasets_ui.ask_format()
 
     def _confirm_csv(self, opts):
-        print(f"\nCSV detectado -> separador: {render.SEP_NAMES.get(opts.sep, repr(opts.sep))} | "
-              f"encabezado: {'si' if opts.header else 'no'} | codificacion: {opts.encoding}")
-        if ask("Es correcto? [S/n]: ").strip().lower() not in ("n", "no"):
-            return opts
-        sep = ask(f"Separador (Enter = {opts.sep!r}; escriba 'tab' para tabulador): ")
-        sep = "\t" if sep.strip().lower() == "tab" else (sep or opts.sep)
-        header = ask("La primera fila es encabezado? [S/n]: ").strip().lower() not in ("n", "no")
-        encoding = ask(f"Codificacion (Enter = {opts.encoding}; p. ej. UTF-8, ISO-8859-1): ").strip() or opts.encoding
-        return CsvOptions(sep=sep, header=header, encoding=encoding)
+        return datasets_ui.confirm_csv(opts)

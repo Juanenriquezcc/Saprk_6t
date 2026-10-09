@@ -11,6 +11,7 @@ from app.export import TYPE_NAMES, etl_text, export_workshop, question_text, sum
 from app.query import spec as s
 from app.questions.parser import parse_question
 from app.questions.validator import read_letter, read_verdict
+from app.ui import datasets as datasets_ui
 from app.ui import menu, prompts, render, sql_mode
 
 OPTIONS = [
@@ -23,6 +24,7 @@ OPTIONS = [
     ("7", "Ejecutar SQL manual"),
     ("8", "Finalizar taller"),
     ("9", "Herramientas avanzadas"),
+    ("10", "Datasets del taller (agregar, esquema, dataset activo, ambito)"),
     ("0", "Salir"),
 ]
 KINDS = {"1": s.OPEN, "2": s.MULTIPLE_CHOICE, "3": s.TRUE_FALSE}
@@ -64,6 +66,9 @@ def run(session):
         elif choice == "9":
             menu.run(session)
             continue
+        elif choice == "10":
+            datasets_ui.run(session)
+            continue
         else:
             print("Opcion no valida. Escriba un numero del menu.")
             continue
@@ -80,6 +85,9 @@ def header(session):
     print(f"  {'[OK]' if etl else '[--]'} ETL ejecutado")
     print(f"  {'[OK]' if rules else '[--]'} Datos validados" + ("" if rules else " (sin reglas del taller)"))
     print("  [OK] Spark SQL disponible (vista 'dataset')\n")
+    if session.uses_catalog:
+        print(f"Ambito de las preguntas: {session.scope.upper()} ({', '.join(e.alias for e in session.catalog)}), "
+              f"{len(session.relations.confirmed())} relacion(es) confirmada(s)\n")
     original = etl.original_rows if etl else session.load.rows
     print(f"Registros originales: {original:,}".replace(",", "."))
     print(f"Registros validos:    {session.profile.rows:,}".replace(",", "."))
@@ -113,6 +121,11 @@ def ask_question(session):
     parsed = parse_question(text)
     kind = choose_kind(parsed)
     options = list(parsed.options)
+    if parsed.options_issue:     # the options cannot be read safely: the user types them again
+        print(f"\nNo se pudieron leer las opciones con seguridad ({parsed.options_issue}). Escribalas de nuevo.")
+        options = read_options()
+        text = parsed.body if parsed.body else text      # the statement is kept; only the options are rebuilt
+        parsed.options = []
     if kind == s.MULTIPLE_CHOICE and len(options) < 2:
         options = read_options()
         if len(options) < 2:

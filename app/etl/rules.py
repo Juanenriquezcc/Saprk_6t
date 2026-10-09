@@ -13,6 +13,9 @@ Shortcuts (Spanish):
     requerido: city, product          -> city IS NOT NULL / product IS NOT NULL
     año(order_date) = 2025            -> year(order_date) = 2025
     derivada: ingresos = quantity * unit_price    -> new column (not a check)
+    equivalencia: product: Laptop Pro14 -> Laptop Pro 14
+                                      -> one spelling of a descriptive value replaced by another;
+                                         asked to the user before applying (never on identifiers)
     # comment
 
 Nothing is hardcoded for a dataset: the rules come from the lab statement.
@@ -26,24 +29,31 @@ from app.errors import AppError
 
 CHECK = "check"
 DERIVED = "derived"
+EQUIVALENCE = "equivalence"
 
 _BETWEEN = re.compile(r"^\s*(`[^`]+`|[\w.]+)\s+entre\s+(\S+)\s+y\s+(\S+)\s*$", re.IGNORECASE)
 _REQUIRED = re.compile(r"^\s*(?:requerid[oa]s?|obligatori[oa]s?|no\s+nul[oa]s?|required)\s*:\s*(.+)$", re.IGNORECASE)
 _DERIVED = re.compile(r"^\s*(?:derivada|columna|derived)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$", re.IGNORECASE)
+_EQUIVALENCE = re.compile(r"^\s*(?:equivalencia|equivalence)\s*:\s*(`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)\s*:\s*"
+                          r"(.+?)\s*(?:->|=>)\s*(.+?)\s*$", re.IGNORECASE)
 _YEAR = re.compile(r"\ba(?:ñ|n|ni)o\s*\(", re.IGNORECASE)     # año( / ano( / anio(
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
 class Rule:
-    kind: str          # check | derived
+    kind: str          # check | derived | equivalence
     text: str          # as written by the student
-    expr: str          # Spark SQL expression
-    name: str = None   # derived column name
+    expr: str          # Spark SQL expression ('' for an equivalence)
+    name: str = None   # derived column name / column of an equivalence
+    values: tuple = None   # equivalence: (spelling found in the data, spelling that replaces it)
 
     def to_dict(self):
-        return {"tipo": "regla" if self.kind == CHECK else "columna derivada", "texto": self.text,
-                "expresion": self.expr, **({"columna": self.name} if self.name else {})}
+        kind = {CHECK: "regla", DERIVED: "columna derivada", EQUIVALENCE: "equivalencia"}[self.kind]
+        data = {"tipo": kind, "texto": self.text, "expresion": self.expr, **({"columna": self.name} if self.name else {})}
+        if self.values:
+            data["de"], data["a"] = self.values
+        return data
 
 
 def parse_rules(text):
@@ -54,6 +64,14 @@ def parse_rules(text):
         if not line or line.startswith("#"):
             continue
         line = line.rstrip(";").strip()
+        m = _EQUIVALENCE.match(line)
+        if m:
+            old, new = (v.strip().strip("'\"").strip() for v in (m.group(2), m.group(3)))
+            if not old or not new or old == new:
+                raise AppError(f"Equivalencia no valida: '{raw.strip()}'.",
+                               "Escriba: equivalencia: columna: valor encontrado -> valor que lo reemplaza")
+            rules.append(Rule(EQUIVALENCE, raw.strip(), "", m.group(1).strip("`"), (old, new)))
+            continue
         line = _YEAR.sub("year(", line)
         m = _DERIVED.match(line)
         if m:

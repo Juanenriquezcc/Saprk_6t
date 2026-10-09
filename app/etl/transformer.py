@@ -56,6 +56,9 @@ class Transformation:
         if self.kind == "category":   # traceability: every original spelling -> value kept
             data["regla"] = "misma palabra salvo mayusculas, tildes o espacios -> escritura mas frecuente"
             data["mapeo"] = dict(sorted(self.params["mapping"].items()))
+        if self.kind == "equivalence":
+            data["regla"] = "equivalencia de la configuracion del caso, confirmada por el usuario"
+            data["de"], data["a"] = self.params["from"], self.params["to"]
         return data
 
 
@@ -91,14 +94,23 @@ def _date_text(col):
     return F.split(clean_text(col), r"[ T]").getItem(0)
 
 
+def text_key(col):
+    """Spark version of category_key(): lowercase, no accents, single inner spaces, trimmed."""
+    from pyspark.sql import functions as F
+    from app.schema.values import ACCENTS, PLAIN
+    return F.translate(F.lower(F.regexp_replace(F.trim(F.col(q(col))), r"\s+", " ")), ACCENTS, PLAIN)
+
+
 def detect(df, load=None):
-    """Returns ([Transformation], [Decision]). Decisions must be answered before apply()."""
+    """Returns ([Transformation], [Decision], [similar values]). Decisions must be answered before
+    apply(). Similar values ('Laptop Pro14' / 'Laptop Pro 14') are only reported, never merged."""
     from pyspark.sql import functions as F
 
     transformations, decisions = _thousands_read_as_decimals(df, load)
+    suggestions = []
     text_cols = [n for n, t in df.dtypes if t == "string" and not n.startswith(RAW_PREFIX)]
     if not text_cols:
-        return transformations, decisions
+        return transformations, decisions, suggestions
 
     exprs = []
     for i, c in enumerate(text_cols):
@@ -150,10 +162,11 @@ def detect(df, load=None):
             categorical.append(c)
 
     for c in categorical:
-        t = _category_plan(df, c)
+        t, similar = _category_plan(df, c)
         if t:
             transformations.append(t)
-    return transformations, decisions
+        suggestions += similar
+    return transformations, decisions, suggestions
 
 
 def _number_plan(col, s, filled):
@@ -255,32 +268,38 @@ def category_key(value):
 
 
 def _category_plan(df, col):
-    """Spellings that differ only in case/accents/spaces -> the most frequent one."""
+    """Spellings that differ only in case/accents/spaces -> the most frequent one. Also returns the
+    values that differ only in inner spaces or punctuation ('Pro14' / 'Pro 14'): they may be
+    different things, so they are reported for an explicit equivalence and never merged here."""
     from pyspark.sql import functions as F
 
     cap = config.ETL_CATEGORY_MAX_DISTINCT
     rows = (df.select(clean_text(col).alias("v")).where(F.col("v").isNotNull())
             .groupBy("v").count().limit(cap + 1).collect())
     if len(rows) > cap:     # the approximate count was low: too many values to be a category
-        return None
+        return None, []
     groups = {}
     for r in rows:
         groups.setdefault(category_key(r["v"]), []).append((r["v"], r["count"]))
-    mapping, details, affected = {}, [], 0
+    mapping, details, affected, compact = {}, [], 0, {}
     for variants in groups.values():
-        if len(variants) < 2:
-            continue
         # Most frequent; on a tie, the spelling with capitals/accents (likely the edited one), then A-Z.
         canonical = sorted(variants, key=lambda v: (-v[1], v[0] == v[0].lower() or v[0] == v[0].upper(), v[0]))[0][0]
+        compact.setdefault(re.sub(r"[\W_]+", "", category_key(canonical)), []).append(
+            (canonical, sum(n for _, n in variants)))
+        if len(variants) < 2:
+            continue
         for value, count in variants:
             if value != canonical:
                 mapping[value] = canonical
                 affected += count
         details.append(f"{' / '.join(repr(v) for v, _ in sorted(variants))} -> {canonical!r}")
+    similar = [f"{col}: " + " / ".join(f"{v!r} ({n})" for v, n in sorted(values))
+               for values in compact.values() if len(values) > 1]
     if not mapping:
-        return None
+        return None, similar
     return Transformation("category", col, f"{col}: {len(details)} categoria(s) con escrituras distintas unificadas",
-                          affected, sorted(details), {"mapping": mapping})
+                          affected, sorted(details), {"mapping": mapping}), similar
 
 
 def apply(df, transformations, answers=None):

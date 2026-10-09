@@ -80,6 +80,14 @@ CATEGORY_MAX_RATIO = 0.5         # ... and fewer distinct values than this share
 CATEGORY_VALUES_LIMIT = 100      # distinct values kept per categorical column (to match questions)
 CATEGORY_MAX_COLUMNS = 10        # categorical columns whose values are collected
 ID_MIN_UNIQUE_RATIO = 0.95
+# Values that questions can name ('Ana', 'José Pérez'): text columns with at most this many distinct
+# values (names, codes) are kept in memory with the profile, in the same bounded Spark job as the
+# categories. Larger columns are searched with Spark only for a capitalized word nothing explained.
+VALUE_INDEX_MAX_DISTINCT = 2000
+VALUE_INDEX_MAX_COLUMNS = 10
+# Relations between catalog tables: candidates proposed per pair of tables (each one is measured
+# with Spark only when the user reviews it).
+RELATION_MAX_CANDIDATES_PER_PAIR = 5
 
 # --- Results ------------------------------------------------------------------
 MAX_DISPLAY_ROWS = 20            # rows shown on screen

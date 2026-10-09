@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 
 from app.query import spec as s
-from app.query.builder import build_sql, build_tie_check
+from app.query.builder import JOIN_SQL, build_sql, build_tie_check
 import config
 from app.query.executor import QueryResult, execute
 from app.questions.intents import NeedsInput
@@ -53,6 +53,11 @@ class Evidence:
     correct_value: object = None
     spec: dict = None
     result_types: list = field(default_factory=list)
+    tables_used: list = field(default_factory=list)       # catalog tables (questions over several tables)
+    relations_used: list = field(default_factory=list)    # confirmed relations behind the JOINs
+    joins: list = field(default_factory=list)             # 'LEFT JOIN clientes ON ...'
+    material_option: str = None   # option the MATERIAL marks as correct ('+D.'): not the computed one, not the student's
+    clarifications: list = field(default_factory=list)    # 'question -> answer' decided by the user for this result
 
     def to_dict(self):
         return asdict(self)
@@ -90,7 +95,7 @@ def run_spec(spark, parsed, spec, known_columns=(), number=None):
     result = execute(spark, built.sql, known_columns=known_columns)
     if spec.aggregation == "SUMMARY":
         result = _summary_table(spec, result)
-    warnings, extra_sql = [], []
+    warnings, extra_sql = list(spec.notes), []
     if result.truncated:
         warnings.append(f"Se muestran solo las primeras {len(result.rows)} filas del resultado.")
 
@@ -115,7 +120,8 @@ def run_spec(spark, parsed, spec, known_columns=(), number=None):
         timestamp=datetime.datetime.now().isoformat(timespec="seconds"), seconds=round(result.seconds, 3),
         warnings=warnings, extra_sql=extra_sql, number=number if number is not None else parsed.number,
         options=[list(o) for o in spec.options], claim=spec.claim, spec=_plain_spec(spec),
-        result_types=list(result.types))
+        result_types=list(result.types), tables_used=spec.tables, relations_used=[j.relation for j in spec.joins],
+        joins=[f"{JOIN_SQL[j.kind]} {j.table} ON {j.left} = {j.right}" for j in spec.joins])
 
     if spec.question_type == s.MULTIPLE_CHOICE:
         if spec.shape == s.RECORD and spec.answer == "row" and result.rows:
@@ -126,6 +132,12 @@ def run_spec(spark, parsed, spec, known_columns=(), number=None):
         evidence.answer = f"{letter}) {dict(spec.options)[letter]}" if letter else NO_MATCH
         if note:
             evidence.warnings.append(note)
+        marked = getattr(parsed, "marked_option", None)
+        if marked:
+            evidence.material_option = f"{marked}) {dict(spec.options).get(marked, '')}"
+            if letter and marked != letter:
+                evidence.warnings.append(f"El material marca la opcion {marked} como correcta, pero el resultado "
+                                         f"calculado coincide con la opcion {letter}.")
     elif spec.question_type == s.TRUE_FALSE:
         evidence.claim_op = spec.claim_op
         if spec.claim_op == "=":
@@ -167,6 +179,11 @@ def _extract(spec, built, result, warnings):
     if spec.aggregation == "SUMMARY":
         return None, [], f"Resumen de {len(result.rows)} columna(s) (ver tabla)"
     if spec.shape == s.ROWS:
+        if spec.joins:     # 'clientes sin pedidos': every value shown can be the answer
+            values = [v for row in result.rows for v in row if v is not None]
+            # ' | ' between rows: this text is also a comment of taller.sql, where ';' ends a statement.
+            shown = " | ".join(" / ".join(_text(v) for v in row if v is not None) for row in result.rows[:5])
+            return None, values, f"{len(result.rows)} registro(s): {shown}" + (" ..." if len(result.rows) > 5 else "")
         return None, [], f"{len(result.rows)} registro(s) mostrado(s)"
 
     if spec.shape in (s.SCALAR, s.GROUPS):
@@ -199,7 +216,7 @@ def _extract(spec, built, result, warnings):
     value = row.get(built.value_column)
     target = spec.target.label()
     if spec.answer.startswith("column:"):
-        column = spec.answer.split(":", 1)[1]
+        column = built.label_column or spec.answer.split(":", 1)[1]    # its result name over JOINs
         others = [value] + [v for k, v in row.items() if k != column]
         return row.get(column), others, f"{_text(row.get(column))} ({target} = {format_number(value)})"
     detail = ", ".join(f"{k}={_text(v)}" for k, v in row.items())
@@ -327,6 +344,8 @@ def explain(spec):
         what = f"se cuentan los grupos de {spec.group_label()} cuyo valor ({base}) cumple la condicion"
     elif agg == "COUNT":
         what = "se cuentan los registros"
+        if spec.joins:
+            what += f" de {spec.count_column.split('.')[0] if spec.count_column else spec.base_table}"
     elif agg == "COUNT_DISTINCT":
         what = f"se cuentan los valores distintos de {m}"
     elif agg == "PERCENT":
@@ -354,7 +373,16 @@ def explain(spec):
     filters = spec.filter_labels()
     if filters:
         what += ". Filtros: " + "; ".join(filters)
+    if spec.joins:
+        what += ". Tablas: " + spec.base_table + "".join(f" {JOIN_TEXT[j.kind]} {j.table} (relacion confirmada {j.relation})"
+                                                         for j in spec.joins)
+    elif spec.base_table:
+        what += f". Tabla: {spec.base_table}"
     return f"{spec.intent}: {what}."
+
+
+JOIN_TEXT = {"INNER": "unida con", "LEFT": "unida (conservando todos sus registros) con",
+             "ANTI": "sin correspondencia en"}
 
 
 def _text(value):

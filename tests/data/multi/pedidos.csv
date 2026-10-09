@@ -1,0 +1,5 @@
+pedido_id,cliente_id,importe,estado
+P1,C1,100,Entregado
+P2,C1,40,Entregado
+P3,C2,70,Pendiente
+P4,C3,30,Entregado

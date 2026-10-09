@@ -1,0 +1,7 @@
+cliente_id,cliente,ciudad,cupo,referido_por
+1,Ana María,Bogotá,1000,Luis
+2,José Pérez,Medellín,2000,
+3,Luis,Bogotá,1500,Ana María
+4,Ángela Ruiz,Cali,500,
+5,Sofía,Pasto,800,Luis
+6,Marta,Bogotá,1200,José Pérez

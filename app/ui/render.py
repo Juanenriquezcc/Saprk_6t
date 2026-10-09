@@ -202,12 +202,20 @@ def etl_report(report):
     print("\nTransformaciones:")
     for label, done in report.checklist():
         print(f"  {'[OK]' if done else '[--]'} {label}")
+    for t in report.transformations:
+        if t.kind == "equivalence":
+            print(f"       {t.description} ({t.affected} valores)")
+    if report.similar_values:
+        print("\nPosibles equivalencias NO aplicadas (difieren en espacios internos o signos):")
+        for line in report.similar_values[:10]:
+            print(f"  - {line}")
+        print("  Si son el mismo valor, agregue una regla: equivalencia: columna: valor -> valor")
     for r in report.rule_results:
         print(f"       regla '{r.text}': {r.failed} incumplen" + (f", {r.unknown} sin evaluar" if r.unknown else ""))
     for column, count in report.invalid_values.items():
         print(f"       {count} valor(es) no validos en {column}")
     if report.rejected_rows:
-        print(f"\nLos rechazados se pueden consultar con SQL: SELECT * FROM {config.REJECTED_VIEW_NAME}")
+        print(f"\nLos rechazados se pueden consultar con SQL: SELECT * FROM {report.views[2]}")
     print("\nDataset listo para consultas.")
     print(LINE)
 
@@ -242,6 +250,10 @@ def workshop_result(ev):
             print(f"  {letter}) {text}")
     print(f"\nRespuesta correcta:\n  {ev.correct_answer or '-'}")
     print(f"\nRespuesta seleccionada:\n  {ev.selected_answer or '(no indicada)'}")
+    if ev.material_option:
+        print(f"\nOpcion marcada en el material (no se usa para validar):\n  {ev.material_option}")
+    for c in ev.clarifications:
+        print(f"Aclaracion: {c}")
     print(f"\n{LINE}\n{'VALIDACION: ' + ev.validation:^52}\n{LINE}")
     if ev.validation_note:
         print(ev.validation_note)

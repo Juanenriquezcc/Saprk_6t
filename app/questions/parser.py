@@ -7,8 +7,11 @@ from app.questions import lexicon as lx
 from app.text import normalize, strip_accents
 
 _NUMBER_PREFIX = re.compile(r"^\s*(?:p|pregunta|question|q)?\s*(\d{1,3})\s*[.:)\-]\s+", re.IGNORECASE)
-_OPTION_LINE = re.compile(r"^\s*\(?([A-Ea-e])\s*[).:\-]\s*(.+?)\s*$")
-_INLINE_OPTION = re.compile(r"(?:^|\s)\(?([A-E])\)\s*")
+# 'A. Monitor 24', 'B) Smartphone X', '+D. Laptop Pro 14' (a leading + * or check marks the option
+# the MATERIAL gives as correct; it is not part of the text), 'D. Laptop Pro 14 [correcta]'.
+_OPTION_LINE = re.compile(r"^\s*(?P<mark>[+*✓✔]\s*)?\(?(?P<letter>[A-Ea-e])\s*[).:\-]\s*(?P<text>.+?)\s*$")
+_OPTION_TAIL_MARK = re.compile(r"\s*(?:\[\s*correct[ao]\s*\]|\(\s*correct[ao]\s*\)|[✓✔])\s*$", re.IGNORECASE)
+_INLINE_OPTION = re.compile(r"(?:^|\s)(?P<mark>[+*]\s*)?\(?([A-E])\)\s*")
 _TF_PREFIX = re.compile(
     r"^\s*(?:verdadero\s*(?:o|/)\s*falso|v\s*(?:o|/)\s*f|true\s*(?:or|/)\s*false|t\s*/\s*f)\s*[:.\-]?\s*"
     r"|^\s*(?:es\s+(?:verdadero|cierto|correcto)\s+que|is\s+it\s+true\s+that)\s+", re.IGNORECASE)
@@ -40,6 +43,8 @@ class ParsedQuestion:
     options: list = field(default_factory=list)   # [(letter, text)]
     claim: str = None
     claim_op: str = "="           # '... es mayor a 100' -> '>'
+    marked_option: str = None     # letter the MATERIAL marks as correct ('+D.'), never the student's answer
+    options_issue: str = None     # the options cannot be read safely (repeated letters...)
 
 
 def parse_question(raw):
@@ -50,7 +55,10 @@ def parse_question(raw):
         number, text = int(m.group(1)), text[m.end():]
 
     text, marked_tf = _strip_tf_markers(text)
-    body, options = _split_options(text)
+    body, options, marked_option = _split_options(text)
+    letters = [letter for letter, _ in options]
+    issue = (f"letras de opcion repetidas ({', '.join(sorted({l for l in letters if letters.count(l) > 1}))})"
+             if len(set(letters)) != len(letters) else None)
     kind = s.MULTIPLE_CHOICE if len(options) >= 2 else s.OPEN
     if kind == s.OPEN:
         options = []
@@ -63,16 +71,28 @@ def parse_question(raw):
         elif explicit:
             kind = s.TRUE_FALSE   # marked as T/F but without a value: interpreter reports it
     return ParsedQuestion(raw=raw, body=body.strip(), normalized=normalize(body), kind=kind,
-                          number=number, options=options, claim=claim, claim_op=claim_op)
+                          number=number, options=options, claim=claim, claim_op=claim_op,
+                          marked_option=marked_option if kind == s.MULTIPLE_CHOICE else None, options_issue=issue)
+
+
+def _clean_option(text):
+    """(text without a trailing '[correcta]' / check mark, marked)."""
+    cleaned = _OPTION_TAIL_MARK.sub("", text).strip()
+    return cleaned, cleaned != text.strip()
 
 
 def _split_options(text):
+    """(body, [(letter, text)], letter marked as correct by the material or None)."""
     lines = [l for l in text.splitlines() if l.strip()]
-    body_lines, options = [], []
+    body_lines, options, marked = [], [], None
     for line in lines:
         m = _OPTION_LINE.match(line)
         if m and (options or len(body_lines) > 0):
-            options.append((m.group(1).upper(), m.group(2).strip()))
+            letter = m.group("letter").upper()
+            option, tail_mark = _clean_option(m.group("text"))
+            options.append((letter, option))
+            if m.group("mark") or tail_mark:
+                marked = letter
         elif options:
             # Continuation of the previous option text.
             letter, prev = options[-1]
@@ -80,18 +100,21 @@ def _split_options(text):
         else:
             body_lines.append(line)
     if len(options) >= 2:
-        return "\n".join(body_lines), options
+        return "\n".join(body_lines), options, marked
 
-    # Options written on the same line: "... A) 10 B) 12 C) 14"
+    # Options written on the same line: "... A) 10 B) 12 +C) 14"
     joined = " ".join(lines)
     marks = list(_INLINE_OPTION.finditer(joined))
     if len(marks) >= 2:
-        options = []
+        options, marked = [], None
         for i, mk in enumerate(marks):
             end = marks[i + 1].start() if i + 1 < len(marks) else len(joined)
-            options.append((mk.group(1), joined[mk.end():end].strip()))
-        return joined[: marks[0].start()], options
-    return "\n".join(lines), []
+            option, tail_mark = _clean_option(joined[mk.end():end])
+            options.append((mk.group(2), option))
+            if mk.group("mark") or tail_mark:
+                marked = mk.group(2)
+        return joined[: marks[0].start()], options, marked
+    return "\n".join(lines), [], None
 
 
 def _strip_tf_markers(text):

@@ -98,6 +98,16 @@ class DateFilter:
 
 
 @dataclass
+class Join:
+    """`kind` JOIN `table` ON `left` = `right`, both 'alias.column', from a CONFIRMED relation."""
+    kind: str                     # INNER | LEFT | ANTI (LEFT ANTI JOIN: left rows without a partner)
+    table: str
+    left: str                     # column of a table already in the FROM
+    right: str                    # column of `table`
+    relation: str = ""            # label of the confirmed relation (evidence)
+
+
+@dataclass
 class QuerySpec:
     intent: str
     shape: str
@@ -124,6 +134,17 @@ class QuerySpec:
     options: list = field(default_factory=list)   # [(letter, text)]
     claim: str = None                             # claimed value in TRUE_FALSE
     claim_op: str = "="                           # '... es mayor a 500000' -> '>'
+    # Several catalog tables. Without base_table the query reads the `dataset` view as always;
+    # with joins every column above is 'alias.column'.
+    base_table: str = None                        # catalog alias of the FROM table
+    joins: list = field(default_factory=list)     # [Join]
+    select: list = field(default_factory=list)    # 'alias.column' shown by RECORD over joins
+    count_column: str = None                      # COUNT(column) instead of COUNT(*) (LEFT JOIN)
+    notes: list = field(default_factory=list)     # warnings of the JOIN plan (rows left out...) for the evidence
+
+    @property
+    def tables(self):
+        return ([self.base_table] if self.base_table else []) + [j.table for j in self.joins]
 
     @property
     def percentage(self):
