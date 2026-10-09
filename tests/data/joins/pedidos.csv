@@ -1,0 +1,8 @@
+pedido_id,cliente_id,producto,unidades,importe
+101,1,Laptop,1,3000
+102,1,Mouse,3,150
+103,2,Laptop,2,6000
+104,3,Mouse,1,50
+105,3,Teclado,2,200
+106,3,Mouse,2,100
+107,9,Teclado,1,100

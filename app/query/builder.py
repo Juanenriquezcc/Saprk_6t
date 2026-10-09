@@ -28,6 +28,9 @@ class BuiltQuery:
 
 
 def ident(name):
+    if "." in name:     # 'alias.column' of a JOIN (catalog aliases and column names are validated)
+        table, column = name.split(".", 1)
+        return f"{ident(table)}.{ident(column)}"
     if _IDENTIFIER.match(name) and name.lower() not in _RESERVED:
         return name
     return "`" + name.replace("`", "``") + "`"
@@ -82,24 +85,63 @@ def date_filter_sql(d):
     return f"{date_expr(d.column, d.column_kind, d.text_format)} {d.op} DATE'{d.value}'"
 
 
+def _bare(name):
+    """'pedidos.unidades' -> 'unidades': result column names never carry the table."""
+    return name.rsplit(".", 1)[-1]
+
+
+JOIN_SQL = {"INNER": "JOIN", "LEFT": "LEFT JOIN", "ANTI": "LEFT ANTI JOIN"}
+
+
+def from_sql(spec):
+    """The `dataset` view, or a catalog table with the JOINs of its confirmed relations."""
+    if not spec.base_table:
+        return config.VIEW_NAME
+    parts = [ident(spec.base_table)]
+    for j in spec.joins:
+        if j.kind not in JOIN_SQL:
+            raise ValueError(f"Tipo de JOIN no admitido: {j.kind}")
+        on = [f"{ident(j.left)} = {ident(j.right)}"] + [sql for sql, table in _filter_parts(spec) if table == j.table]
+        parts.append(f"{JOIN_SQL[j.kind]} {ident(j.table)} ON " + " AND ".join(on))
+    return "\n".join(parts)
+
+
+def _filter_parts(spec):
+    """[(condition SQL, outer table or None)]. A condition on the table of a LEFT / ANTI JOIN goes to
+    its ON: in WHERE it would discard the rows the LEFT JOIN keeps (or change which rows ANTI finds)."""
+    outer = {j.table for j in spec.joins if j.kind in ("LEFT", "ANTI")}
+
+    def table_of(*columns):
+        return next((c.split(".", 1)[0] for c in columns if c and "." in c and c.split(".", 1)[0] in outer), None)
+
+    return ([(condition_sql(c), table_of(c.column, c.other_column)) for c in spec.filters]
+            + [(date_filter_sql(d), table_of(d.column)) for d in spec.date_filters])
+
+
+def output_names(columns):
+    """'alias.column' -> result name: the column, or 'alias__column' when two tables share it."""
+    bare = [_bare(c) for c in columns]
+    return {c: (b if bare.count(b) == 1 else c.replace(".", "__")) for c, b in zip(columns, bare)}
+
+
 def value_alias(spec):
     agg = spec.aggregation
     if agg == "COUNT":
         return "total_registros"
     if agg == "COUNT_DISTINCT":
-        return f"distintos_{_slug(spec.target.columns[0])}"
+        return f"distintos_{_slug(_bare(spec.target.columns[0]))}"
     if agg == "PERCENT":
         return "porcentaje"
     if agg == "PERIOD_CHANGE":
         return "variacion_pct_periodo"
     if spec.target.kind == "difference":
-        name = f"{spec.target.columns[0]}_menos_{spec.target.columns[1]}"
+        name = f"{_bare(spec.target.columns[0])}_menos_{_bare(spec.target.columns[1])}"
     elif spec.target.kind == "pct_change":
         name = "variacion_pct"
     elif spec.target.kind in ("product", "product_discount"):
         name = "ingresos" if spec.target.kind == "product" else "ingresos_con_descuento"
     else:
-        name = spec.target.columns[0]
+        name = _bare(spec.target.columns[0])
     prefix = AGG_PREFIX.get(agg, f"{agg.lower()}_") if agg else ""   # RECORD has no aggregation
     if agg == "PERCENTILE":
         prefix = f"percentil_{format(spec.percentile * 100, 'g').replace('.', '_')}_"
@@ -119,6 +161,8 @@ TIME_SQL = {   # group expression and column name of each time grain
 def group_sql(spec):
     """(SELECT expression, result column name) of the grouping."""
     if not spec.group_time:
+        if spec.joins:      # 'clientes.ciudad AS ciudad': ORDER BY never sees two columns with that name
+            return f"{ident(spec.group_by)} AS {ident(_bare(spec.group_by))}", _bare(spec.group_by)
         return ident(spec.group_by), spec.group_by
     expr, name = TIME_SQL[spec.group_time]
     d = date_expr(spec.group_by, spec.group_date_kind, spec.group_date_format)
@@ -128,7 +172,7 @@ def group_sql(spec):
 def aggregate_sql(spec):
     agg = spec.aggregation
     if agg == "COUNT":
-        return "COUNT(*)"
+        return f"COUNT({ident(spec.count_column)})" if spec.count_column else "COUNT(*)"
     if agg == "COUNT_DISTINCT":
         return f"COUNT(DISTINCT {ident(spec.target.columns[0])})"
     if agg == "PERCENT":
@@ -150,7 +194,7 @@ def aggregate_sql(spec):
 
 
 def where_sql(spec, extra=()):
-    parts = [condition_sql(c) for c in spec.filters] + [date_filter_sql(d) for d in spec.date_filters] + list(extra)
+    parts = [sql for sql, outer in _filter_parts(spec) if outer is None] + list(extra)
     return ("\nWHERE " + "\n  AND ".join(parts)) if parts else ""
 
 
@@ -171,7 +215,7 @@ def summary_alias(stat, column):
 
 
 def build_sql(spec):
-    view = config.VIEW_NAME
+    view = from_sql(spec)
     if spec.aggregation == "SUMMARY":
         exprs = [f"{SUMMARY_SQL[stat].format(c=ident(col))} AS {summary_alias(stat, col)}"
                  for col in spec.columns for stat in spec.stats]
@@ -191,11 +235,15 @@ def build_sql(spec):
     if spec.shape == s.RECORD:
         m = metric_sql(spec.target)
         derived = spec.target.kind != "column"
-        alias = value_alias(spec) if derived else spec.target.columns[0]
-        select = f"SELECT *, {m} AS {alias}" if derived else "SELECT *"
+        names = output_names(spec.select)
+        alias = value_alias(spec) if derived else names.get(spec.target.columns[0], spec.target.columns[0])
+        # Over JOINs every column is listed with a unique name (two tables may share one).
+        columns = ", ".join(f"{ident(c)} AS {ident(n)}" for c, n in names.items()) if spec.select else "*"
+        select = f"SELECT {columns}, {m} AS {alias}" if derived else f"SELECT {columns}"
         sql = (f"{select}\nFROM {view}{where_sql(spec, [f'{m} IS NOT NULL'])}\n"
                f"ORDER BY {m} {spec.order or 'DESC'}\nLIMIT {spec.limit or 1}")
-        return BuiltQuery(sql, value_column=alias)
+        answer = spec.answer.split(":", 1)[1] if spec.answer.startswith("column:") else None
+        return BuiltQuery(sql, value_column=alias, label_column=names.get(answer) if answer else None)
 
     alias = value_alias(spec)
     value = aggregate_sql(spec)
@@ -203,7 +251,7 @@ def build_sql(spec):
         return BuiltQuery(f"SELECT {value} AS {alias}\nFROM {view}{where_sql(spec)}", value_column=alias)
 
     g_select, g_name = group_sql(spec)
-    g = g_select.rsplit(" AS ", 1)[0] if spec.group_time else g_select
+    g = g_select.rsplit(" AS ", 1)[0] if (spec.group_time or spec.joins) else g_select
     g_order = ident(g_name)
     having = ""
     if spec.having:
@@ -230,7 +278,7 @@ def build_sql(spec):
 
 def build_tie_check(spec, built, top_value):
     """Counts how many groups/rows share the best value (to report ties honestly)."""
-    view = config.VIEW_NAME
+    view = from_sql(spec)
     if spec.shape == s.RECORD:
         m = metric_sql(spec.target)
         return f"SELECT COUNT(*) AS empates\nFROM {view}{where_sql(spec, [f'{m} = {literal(top_value)}'])}"

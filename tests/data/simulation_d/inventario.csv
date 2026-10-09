@@ -1,0 +1,12 @@
+producto_id,producto,categoria,stock,precio,proveedor_id,fecha_actualizacion
+101,Laptop,Computo,5,3000,9001,2025-01-10
+102,Desktop,Computo,3,3000,9002,2025-02-15
+103,Mouse,Accesorios,50,20,9001,2025-03-01
+104,Teclado,Accesorios,0,50,9003,2025-03-05
+105,Monitor,Pantallas,,700,9002,2025-04-01
+106,Cable,Accesorios,30,0,9003,2025-04-10
+107,Webcam,Accesorios,10,,9001,2025-05-01
+108,Parlante,Audio,8,150,9004,fecha_invalida
+109,Audifonos,Audio,12,90,9004,2025-06-15
+110,Tablet,Computo,7,1200,9002,2025-07-20
+111,Stock,Accesorios,4,35,9003,2025-08-01

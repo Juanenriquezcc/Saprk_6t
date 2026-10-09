@@ -1,0 +1,15 @@
+fila,referencia,producto,cantidad,precio
+1,R-001,Laptop Pro 14,2,100
+2,R-002,Laptop Pro14,1,100
+3,R-003,  laptop pro 14 ,1,100
+4,R-004,Mouse X,3,20
+5,R-005,MouseX,2,20
+6,R-006,Teclado Mecánico,1,50
+7,R-007,teclado mecanico,2,50
+8,R-008,Monitor,,300
+9,R-009,Monitor,-1,300
+10,R-010,Monitor,abc,300
+11,R-011,Parlante,1,-5
+6,R-006,Teclado Mecánico,1,50
+12,R-012,Parlante,2,80
+13,R001,Cable,1,10

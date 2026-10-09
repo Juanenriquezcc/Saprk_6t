@@ -1,0 +1,9 @@
+order_id,product,quantity,status,unit_price,city
+O1,Laptop,2,Entregado,100,Pasto
+O2,Laptop,1,Entregado,100,Bogota
+O3,Mouse,5,Entregado,20,Pasto
+O4,Mouse,3,Pendiente,20,Bogota
+O5,Teclado,4,Entregado,50,Cali
+O6,Teclado,1,Devuelto,50,Cali
+O7,Mouse,2,Entregado,20,Bogota
+O8,Laptop,3,Pendiente,100,Cali

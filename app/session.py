@@ -16,8 +16,11 @@ from app.questions.parser import ParsedQuestion, parse_question
 from app.text import normalize
 from app.questions.resolver import Evidence, evidence_for_sql, run_spec, solve
 from app.questions.validator import UNRESOLVED, validate
-from app.schema.profiler import profile_dataset
-from app.schema.semantic import detect_roles
+from app.catalog import DatasetCatalog, describe
+from app.questions.joins import CatalogInterpreter
+from app.schema.values import ValueLookup
+
+DATASET_SCOPE, CATALOG_SCOPE, AUTO_SCOPE = "dataset", "catalogo", "automatico"
 
 
 @dataclass
@@ -31,17 +34,60 @@ class LabSession:
     interpreter: Interpreter = None
     etl: object = None            # EtlReport when the data went through the ETL
     sql_errors: int = 0           # failed queries (shown in the workshop summary)
+    # Additional tables, each in its own view. The dataset above (view `dataset`) is the active
+    # one: questions, guided analysis and the workshop work on it only.
+    catalog: DatasetCatalog = field(default_factory=DatasetCatalog)
+    # Where questions are answered: the active dataset, the catalog tables (combined through confirmed
+    # relations, app/questions/joins.py) or automatico (default): the catalog when the active dataset is
+    # one of its tables and there are several, so each question finds its own tables; otherwise the
+    # active dataset, exactly as before. An explicit choice of the user is never changed silently.
+    scope: str = AUTO_SCOPE
+    active_alias: str = None      # catalog alias of the active dataset (when it is part of the catalog)
+    catalog_choices: dict = field(default_factory=dict)   # remembered choices of catalog questions
+    catalog_interpreter: CatalogInterpreter = None
 
     def __post_init__(self):
-        self.interpreter = Interpreter(self.profile, self.semantic, self.choices)
+        self.interpreter = Interpreter(self.profile, self.semantic, self.choices,
+                                       value_lookup=ValueLookup(lambda: [(self.df, self.profile)]))
+        self.catalog_interpreter = CatalogInterpreter(self.catalog, self.catalog_choices)
+
+    @property
+    def uses_catalog(self):
+        if self.scope == CATALOG_SCOPE:
+            return True
+        return self.scope == AUTO_SCOPE and self.active_alias in self.catalog and len(self.catalog) > 1
+
+    @property
+    def active_interpreter(self):
+        return self.catalog_interpreter if self.uses_catalog else self.interpreter
+
+    @classmethod
+    def from_catalog(cls, spark, catalog, alias):
+        """Session of a workshop with several datasets: `alias` is the active one (view `dataset`)."""
+        entry = catalog.get(alias)
+        entry.df.createOrReplaceTempView(config.VIEW_NAME)
+        return cls(spark=spark, load=entry.load, profile=entry.profile, semantic=entry.semantic, etl=entry.etl,
+                   catalog=catalog, active_alias=entry.alias)
+
+    def activate(self, alias):
+        """Another catalog table becomes the active dataset (view `dataset`): nothing is read again."""
+        entry = self.catalog.get(alias)
+        entry.df.createOrReplaceTempView(config.VIEW_NAME)
+        self.load, self.profile, self.semantic, self.etl = entry.load, entry.profile, entry.semantic, entry.etl
+        self.active_alias = entry.alias
+        self.choices.clear()
+        self.interpreter = Interpreter(self.profile, self.semantic, self.choices,
+                                       value_lookup=ValueLookup(lambda: [(self.df, self.profile)]))
 
     @classmethod
     def start(cls, spark, load, etl=None):
-        df, rows = (etl.df, etl.valid_rows) if etl else (load.df, load.rows)
-        profile = profile_dataset(df, rows)
-        if etl:
-            etl.null_counts = {c.name: c.nulls for c in profile.columns}
-        return cls(spark=spark, load=load, profile=profile, semantic=detect_roles(profile), etl=etl)
+        profile, semantic = describe(load, etl)
+        return cls(spark=spark, load=load, profile=profile, semantic=semantic, etl=etl)
+
+    @property
+    def relations(self):
+        """Relations among the catalog tables (the active `dataset` is not part of the catalog)."""
+        return self.catalog.relations
 
     @property
     def df(self):
@@ -57,18 +103,22 @@ class LabSession:
         Returns Evidence, or NeedsInput when the question cannot be interpreted.
         """
         parsed = force_kind(parse_question(text), kind)
-        extra = {}
+        interpreter = self.active_interpreter
+        extra, clarifications = {}, []
         while True:
-            outcome = solve(self.spark, self.interpreter, parsed, extra, number=self._next_number(parsed))
+            outcome = solve(self.spark, interpreter, parsed, extra, number=self._next_number(parsed))
             if not isinstance(outcome, NeedsInput):
+                outcome.clarifications = clarifications
                 return self._record(outcome)
             if not outcome.options:
                 return outcome
             value = choose(outcome)
             if value is None:
                 return None
+            label = next((l for l, v in outcome.options if v == value), str(value))
+            clarifications.append(f"{outcome.message} -> {label}")
             if outcome.remember:
-                self.choices[outcome.key] = value
+                interpreter.choices[outcome.key] = value
             else:
                 extra[outcome.key] = value
 

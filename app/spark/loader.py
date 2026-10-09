@@ -1,4 +1,4 @@
-"""Format detection, PySpark reading, validation and registration of the `dataset` view.
+"""Format detection, PySpark reading, validation and registration of a view (`dataset` by default).
 
 Data never travels to Python: only `count()` and schema metadata.
 """
@@ -218,7 +218,7 @@ def _clean_name(name, index):
 
 # --- Load ---------------------------------------------------------------------
 
-def load_dataset(spark, path, fmt, csv_options=None):
+def load_dataset(spark, path, fmt, csv_options=None, view=config.VIEW_NAME):
     from pyspark.sql import functions as F
 
     start = time.perf_counter()
@@ -263,7 +263,7 @@ def load_dataset(spark, path, fmt, csv_options=None):
         df = df.toDF(*names)
     if malformed:
         warnings.append(f"{malformed} registro(s) mal formados: se conservaron con valores nulos.")
-    df.createOrReplaceTempView(config.VIEW_NAME)
+    df.createOrReplaceTempView(view)
 
     return LoadResult(df=df, path=path, fmt=fmt, rows=rows, columns=list(df.columns),
                       renamed=renamed, malformed=malformed, warnings=warnings,

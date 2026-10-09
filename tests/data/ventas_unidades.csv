@@ -1,0 +1,11 @@
+order_id,department,product,quantity,unit_price_cop,status
+1,Antioquia,Monitor 24,9,700000,Entregado
+2,Cundinamarca,Smartphone X,4,1700000,Entregado
+3,Cundinamarca,Smartphone X,4,1700000,Entregado
+4,Valle del Cauca,Smartphone X,3,1700000,Entregado
+5,Valle del Cauca,Audífonos Bluetooth,1,150000,Entregado
+6,Valle del Cauca,Audífonos Bluetooth,1,150000,Entregado
+7,Valle del Cauca,Audífonos Bluetooth,1,150000,Entregado
+8,Antioquia,Audífonos Bluetooth,1,150000,Entregado
+9,Valle del Cauca,Laptop Pro 14,20,3100000,Cancelado
+10,Cundinamarca,Monitor 24,1,700000,Entregado

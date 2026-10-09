@@ -32,7 +32,8 @@ class ColumnProfile:
     date_format: str = None       # Spark pattern when a text column holds dates
     is_id: bool = False
     is_categorical: bool = False
-    values: list = field(default_factory=list)   # distinct values of categorical columns
+    values: list = field(default_factory=list)   # distinct values of categorical / value-indexed columns
+    values_complete: bool = False                # `values` holds every distinct value of the column
 
     @property
     def is_date(self):
@@ -106,7 +107,12 @@ def profile_dataset(df, rows):
         c.is_id = _looks_like_id(c, non_null)
         c.is_categorical = _looks_categorical(c, non_null)
 
-    _collect_category_values(df, [c for c in columns if c.is_categorical][: config.CATEGORY_MAX_COLUMNS])
+    categories = [c for c in columns if c.is_categorical][: config.CATEGORY_MAX_COLUMNS]
+    # Names and codes ('Ana', 'ORD-17') that a question may name: bounded, never a large column.
+    labels = [c for c in columns if c.kind == "text" and not c.is_categorical and c.date_format is None
+              and 0 < (c.approx_distinct or 0) <= config.VALUE_INDEX_MAX_DISTINCT][: config.VALUE_INDEX_MAX_COLUMNS]
+    _collect_category_values(df, [(c, config.CATEGORY_VALUES_LIMIT) for c in categories]
+                             + [(c, config.VALUE_INDEX_MAX_DISTINCT) for c in labels])
     return DatasetProfile(rows=rows, columns=columns, samples=samples, seconds=time.perf_counter() - start)
 
 
@@ -145,16 +151,18 @@ def _text_date_format(values):
 
 
 def _collect_category_values(df, columns):
-    """Distinct values of low-cardinality columns, so questions can mention them ('AAPL')."""
+    """Distinct values of [(column, limit)] in ONE aggregation, so questions can mention them
+    ('AAPL', 'Ana'). One more than the limit is read to know whether the list is complete."""
     if not columns:
         return
     from pyspark.sql import functions as F
 
-    exprs = [F.slice(F.array_sort(F.collect_set(F.col(_q(c.name)))), 1, config.CATEGORY_VALUES_LIMIT).alias(f"v_{i}")
-             for i, c in enumerate(columns)]
+    exprs = [F.slice(F.array_sort(F.collect_set(F.col(_q(c.name)))), 1, limit + 1).alias(f"v_{i}")
+             for i, (c, limit) in enumerate(columns)]
     row = df.agg(*exprs).first()
-    for i, c in enumerate(columns):
-        c.values = list(row[f"v_{i}"] or [])
+    for i, (c, limit) in enumerate(columns):
+        values = list(row[f"v_{i}"] or [])
+        c.values, c.values_complete = values[:limit], len(values) <= limit
 
 
 def _q(name):
